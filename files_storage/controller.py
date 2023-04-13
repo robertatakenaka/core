@@ -4,7 +4,11 @@ import os
 from django.utils.translation import gettext_lazy as _
 
 from files_storage import exceptions
-from files_storage.minio import MinioStorage
+from files_storage.minio import (
+    MinioStorage,
+    MinioStorageFPutContentError,
+    MinioStorageRegisterError,
+)
 from files_storage.models import MinioConfiguration, MinioFile
 from files_storage.utils import generate_finger_print
 
@@ -34,11 +38,11 @@ class FilesStorageManager:
         self.files_storage = get_files_storage(self.config)
 
     def push_file(self, source_filepath, subdirs, preserve_name):
-        try:
-            basename = os.path.basename(source_filepath)
-            subdirs = os.path.join(self.config.bucket_app_subdir, subdirs)
-            logging.info("Register {} {}".format(source_filepath, subdirs))
+        basename = os.path.basename(source_filepath)
+        subdirs = os.path.join(self.config.bucket_app_subdir, subdirs)
+        logging.info("Register {} {}".format(source_filepath, subdirs))
 
+        try:
             response = self.files_storage.register(
                 source_filepath,
                 subdirs=subdirs,
@@ -46,7 +50,7 @@ class FilesStorageManager:
             )
             logging.info("Response %s %s" % (source_filepath, response))
             return {"uri": response["uri"], "basename": basename}
-        except Exception as e:
+        except MinioStorageRegisterError as e:
             raise exceptions.PushFileError(
                 _("Unable to push file {} {} {} {}").format(
                     source_filepath, subdirs, type(e), e
@@ -54,21 +58,21 @@ class FilesStorageManager:
             )
 
     def push_xml_content(self, filename, subdirs, content, finger_print):
+        mimetype = "text/xml"
+        name, ext = os.path.splitext(filename)
+
+        object_name = f"{name}/{finger_print}/{filename}"
+        if subdirs:
+            object_name = f"{subdirs}/{object_name}"
+
         try:
-            mimetype = "text/xml"
-            name, ext = os.path.splitext(filename)
-
-            object_name = f"{name}/{finger_print}/{filename}"
-            if subdirs:
-                object_name = f"{subdirs}/{object_name}"
-
             uri = self.files_storage.fput_content(
                 content,
                 mimetype=mimetype,
                 object_name=f"{self.config.bucket_app_subdir}/{object_name}",
             )
             return {"uri": uri}
-        except Exception as e:
+        except MinioStorageFPutContentError as e:
             raise exceptions.PutXMLContentError(
                 _("Unable to push xml content {} {} {} {}").format(
                     filename, subdirs, type(e), e

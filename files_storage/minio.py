@@ -80,6 +80,7 @@ class MinioStorage:
         minio_secure=True,
         minio_http_client=None,
     ):
+
         self.bucket_root = bucket_root
         self.POLICY_READ_ONLY = {
             "Version": "2012-10-17",
@@ -227,8 +228,7 @@ class MinioStorage:
             return self.get_urls(object_name)
         except Exception as e:
             raise MinioStorageFPutError(
-                "Unable to execute fput for %s %s %s %s"
-                % (file_path, object_name, type(e), e)
+                "Unable to fput for %s %s %s %s" % (file_path, object_name, type(e), e)
             )
 
     def fput_content(self, content, mimetype, object_name) -> str:
@@ -239,7 +239,7 @@ class MinioStorage:
             return self.fput(tf.name, object_name, mimetype)
         except Exception as e:
             raise MinioStorageFPutContentError(
-                "Unable to create temporary file %s %s %s" % (object_name, type(e), e)
+                "Unable to fput content %s %s %s" % (object_name, type(e), e)
             )
 
     def remove(self, object_name: str) -> None:
