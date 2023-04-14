@@ -10,6 +10,7 @@ from django.db import models
 from django.utils.translation import gettext as _
 from wagtail.admin.panels import FieldPanel
 
+from article.models import Article
 from core.forms import CoreAdminModelForm
 from core.models import CommonControlField
 from files_storage.controller import MinioStorageFPutContentError
@@ -266,6 +267,9 @@ class XMLDocPid(CommonControlField):
     Representação de atributos do Doc que o identifique unicamente
     """
 
+    article = models.ForeignKey(
+        Article, on_delete=models.SET_NULL, null=True, blank=True
+    )
     journal = models.ForeignKey(
         XMLJournal, on_delete=models.SET_NULL, null=True, blank=True
     )
@@ -337,7 +341,38 @@ class XMLDocPid(CommonControlField):
             "v2": self.v2,
             "aop_pid": self.aop_pid,
             "xml_uri": self.xml_uri,
+            "article": self.article,
+            "created": self.created and self.created.isoformat(),
+            "updated": self.updated and self.updated.isoformat(),
         }
+
+    @classmethod
+    def xml_feed(cls, from_ingress_date=None, issn=None, pub_year=None, include_has_article=False):
+        """
+        Retorna a lista de XML para alimentar o modelo Article e relacionados
+        """
+        params = {}
+        if not include_has_article:
+            params['article__isnull'] = True
+        if from_ingress_date:
+            params["updated__gte"] = from_ingress_date
+        qs = None
+        if issn:
+            qs = (Q(journal__issn_electronic=issn) | Q(journal__issn_print=issn))
+        if pub_year:
+            if qs:
+                qs = qs & Q(issn__pub_year=pub_year)
+            else:
+                qs = Q(issn__pub_year=pub_year)
+
+        if qs and params:
+            yield from cls.objects.filter(qs, **params).order_by('updated').iterator()
+        elif qs:
+            yield from cls.objects.filter(qs).order_by('updated').iterator()
+        elif params:
+            yield from cls.objects.filter(**params).order_by('updated').iterator()
+        else:
+            yield from cls.objects.order_by('updated').iterator()
 
     @classmethod
     def unsynchronized(cls):
@@ -405,27 +440,25 @@ class XMLDocPid(CommonControlField):
 
         Returns
         -------
-            None
-            or
             {
                 "v3": self.v3,
                 "v2": self.v2,
                 "aop_pid": self.aop_pid,
                 "xml_uri": self.xml_uri,
+                "article": self.article,
+                "created": self.created.isoformat(),
+                "updated": self.updated.isoformat(),
                 "xml_changed": boolean,
+                "record_status": created | updated | retrieved
             }
             or
             {
-                "error": str(
-                    ForbiddenXMLDocPidRegistrationError
-                    NotEnoughParametersToGetDocumentRecordError
-                    QueryDocumentMultipleObjectsReturnedError
-                ),
+                "error_type": self.error_type,
+                "error_message": self.error_message,
+                "id": self.finger_print,
+                "basename": self.basename,
             }
 
-        Raises
-        ------
-        PutXMLContentError
         """
         try:
             pkg_name, ext = os.path.splitext(os.path.basename(filename))
@@ -443,7 +476,9 @@ class XMLDocPid(CommonControlField):
             # verfica os PIDs encontrados no XML / atualiza-os se necessário
             xml_changed = cls._complete_pids(xml_adapter, registered)
 
+            data = {}
             if registered:
+                data["record_status"] = "retrieved"
                 if not registered.is_equal_to(xml_adapter):
                     registered._update(
                         xml_adapter,
@@ -453,6 +488,7 @@ class XMLDocPid(CommonControlField):
                         pkg_name,
                         synchronized,
                     )
+                    data["record_status"] = "updated"
             else:
                 registered = cls._create(
                     xml_adapter,
@@ -462,8 +498,9 @@ class XMLDocPid(CommonControlField):
                     pkg_name,
                     synchronized,
                 )
+                data["record_status"] = "created"
 
-            data = registered.data
+            data.update(registered.data)
             data["xml_changed"] = xml_changed
             return data
 
@@ -576,7 +613,19 @@ class XMLDocPid(CommonControlField):
 
         Returns
         -------
-            None or XMLDocPid.data (dict) or {"error": str(e)}
+            None
+            or
+            {
+                "v3": self.v3,
+                "v2": self.v2,
+                "aop_pid": self.aop_pid,
+                "xml_uri": self.xml_uri,
+                "article": self.article,
+                "created": self.created.isoformat(),
+                "updated": self.updated.isoformat(),
+            }
+            or
+            {"error": str(e)}
         """
         xml_adapter = xml_sps_adapter.PidProviderXMLAdapter(xml_with_pre)
         try:
