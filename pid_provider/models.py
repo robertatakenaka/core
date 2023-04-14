@@ -1,15 +1,18 @@
+import os
 import hashlib
 import logging
 from datetime import datetime
 from http import HTTPStatus
 from shutil import copyfile
 
+from django.core.files.base import ContentFile
 from django.db import models
 from django.utils.translation import gettext as _
 from wagtail.admin.edit_handlers import FieldPanel
 
+from core.forms import CoreAdminModelForm
 from core.models import CommonControlField
-from files_storage.exceptions import PutXMLContentError
+from files_storage.controller import MinioStorageFPutContentError
 from files_storage.models import MinioFile
 from pid_provider import exceptions, v3_gen, xml_sps_adapter
 from xmlsps.xml_sps_lib import get_xml_with_pre_from_uri
@@ -21,6 +24,72 @@ LOGGER_FMT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 def utcnow():
     return datetime.utcnow()
     # return datetime.utcnow().isoformat().replace("T", " ") + "Z"
+
+
+class PidProviderBadRequest(CommonControlField):
+    """
+    Tem função de guardar XML que falhou no registro
+    """
+
+    basename = models.TextField(_("Basename"), null=True, blank=True)
+    finger_print = models.CharField(max_length=65, null=True, blank=True)
+    error_type = models.TextField(null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+    xml = models.FileField(upload_to="bad_request")
+
+    class Meta:
+
+        indexes = [
+            models.Index(fields=["basename"]),
+            models.Index(fields=["finger_print"]),
+            models.Index(fields=["error_type"]),
+            models.Index(fields=["error_message"]),
+        ]
+
+    def __unicode__(self):
+        return f"{self.basename} {self.error_type}"
+
+    def __str__(self):
+        return f"{self.basename} {self.error_type}"
+
+    @property
+    def data(self):
+        return {
+            "error_type": self.error_type,
+            "error_message": self.error_message,
+            "id": self.finger_print,
+            "basename": self.basename,
+        }
+
+    @classmethod
+    def get_or_create(cls, creator, basename, exception, xml_adapter):
+        finger_print = xml_adapter.finger_print
+
+        try:
+            obj = cls.objects.get(finger_print=finger_print)
+        except cls.DoesNotExist:
+            obj = cls()
+            obj.finger_print = finger_print
+
+        obj.xml = ContentFile(xml_adapter.tostring(), name=finger_print + ".xml")
+        obj.basename = basename
+        obj.error_type = str(type(exception))
+        obj.error_message = str(exception)
+        obj.creator = creator
+        obj.save()
+        return obj
+
+    panels = [
+        FieldPanel("basename"),
+        FieldPanel("uri"),
+        FieldPanel("xml"),
+        FieldPanel("error_type"),
+        FieldPanel("error_message"),
+        FieldPanel("created"),
+        FieldPanel("creator"),
+    ]
+
+    base_form_class = CoreAdminModelForm
 
 
 class XMLJournal(models.Model):
@@ -326,7 +395,7 @@ class XMLDocPid(CommonControlField):
 
     @classmethod
     def register(
-        cls, xml_with_pre, filename, user, register_pid_provider_xml, synchronized=None
+        cls, xml_with_pre, filename, user, push_xml_content, synchronized=None
     ):
         """
         Evaluate the XML data and returns corresponding PID v3, v2, aop_pid
@@ -339,12 +408,26 @@ class XMLDocPid(CommonControlField):
 
         Returns
         -------
-            dict or None
-                {"registered": XMLArticle.data, "xml_changed": boolean,
-                 "error": str(ForbiddenXMLDocPidRegistrationError)}
+            None
+            or
+            {
+                "v3": self.v3,
+                "v2": self.v2,
+                "aop_pid": self.aop_pid,
+                "xml_uri": self.xml_uri,
+                "xml_changed": boolean,
+            }
+            or
+            {
+                "error": str(
+                    ForbiddenXMLDocPidRegistrationError
+                    NotEnoughParametersToGetDocumentRecordError
+                    QueryDocumentMultipleObjectsReturnedError
+                ),
+            }
+
         Raises
         ------
-        exceptions.QueryDocumentMultipleObjectsReturnedError
         PutXMLContentError
         """
         try:
@@ -366,22 +449,40 @@ class XMLDocPid(CommonControlField):
             if registered:
                 if not registered.is_equal_to(xml_adapter):
                     registered._update(
-                        xml_adapter, user, push_xml_content, filename, pkg_name
+                        xml_adapter,
+                        user,
+                        push_xml_content,
+                        filename,
+                        pkg_name,
+                        synchronized,
                     )
             else:
                 registered = cls._create(
-                    xml_adapter, user, push_xml_content, filename, pkg_name
+                    xml_adapter,
+                    user,
+                    push_xml_content,
+                    filename,
+                    pkg_name,
+                    synchronized,
                 )
 
-            return {"registered": registered.data, "xml_changed": xml_changed}
+            data = registered.data
+            data["xml_changed"] = xml_changed
+            return data
 
         except (
             exceptions.ForbiddenXMLDocPidRegistrationError,
             exceptions.NotEnoughParametersToGetDocumentRecordError,
             exceptions.QueryDocumentMultipleObjectsReturnedError,
+            MinioStorageFPutContentError,
         ) as e:
-            logging.exception(e)
-            return {"error": str(e)}
+            bad_request = PidProviderBadRequest.get_or_create(
+                user,
+                filename,
+                e,
+                xml_adapter,
+            )
+            return bad_request.data
 
     def push_xml_content(self, xml_adapter, user, push_xml_content, filename):
         finger_print = xml_adapter.finger_print
@@ -528,13 +629,17 @@ class XMLDocPid(CommonControlField):
                 )
 
     @classmethod
-    def _create(cls, xml_adapter, user, push_xml_content, filename, pkg_name):
+    def _create(
+        cls, xml_adapter, user, push_xml_content, filename, pkg_name, synchronized=None
+    ):
         try:
             doc = cls()
             doc.creator = user
             doc.created = utcnow()
             doc.save()
-            return doc._update(xml_adapter, user, push_xml_content, filename, pkg_name)
+            return doc._update(
+                xml_adapter, user, push_xml_content, filename, pkg_name, synchronized
+            )
         except Exception as e:
             LOGGER.exception(e)
             raise exceptions.XMLDocPidCreateError(
@@ -545,10 +650,13 @@ class XMLDocPid(CommonControlField):
                 )
             )
 
-    def _update(self, xml_adapter, user, push_xml_content, filename, pkg_name):
+    def _update(
+        self, xml_adapter, user, push_xml_content, filename, pkg_name, synchronized=None
+    ):
         self.push_xml_content(xml_adapter, user, push_xml_content, filename)
         try:
             self._add_data(xml_adapter, user, pkg_name)
+            self.synchronized = synchronized
             self.updated_by = user
             self.updated = utcnow()
             self.save()
