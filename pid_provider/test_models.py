@@ -937,3 +937,38 @@ class XMLDocPidUpdateTest(TestCase):
                 "3300d3ff5406efdf74bbba5d46a8b156f99c455df7d70dedd3370433a0105ca9"
             ),
         )
+
+
+@patch("pid_provider.models.utcnow", side_effect=["2020-02-02", "2020-02-03"])
+@patch("pid_provider.models.XMLDocPid.add_version")
+@patch("pid_provider.models.XMLDocPid._add_data")
+@patch("pid_provider.models.PidProviderBadRequest.save")
+class XMLDocPidRegisterTest(TestCase):
+    def test_register_register_bad_request_and_returns_error(
+        self,
+        mock_xmldocpid_save,
+        mock_add_data,
+        mock_add_version,
+        mock_now,
+    ):
+        expected = {
+            "error_type": "<class 'pid_provider.exceptions.NotEnoughParametersToGetDocumentRecordError'>",
+            "error_message": "No attribute enough for disambiguations {'z_surnames': None, 'z_collab': None, 'main_doi': None, 'z_links': None, 'z_partial_body': None, 'pkg_name': None, 'elocation_id': None, 'journal__issn_print': None, 'journal__issn_electronic': None, 'article_pub_year': None, 'z_article_titles_texts': None}",
+            "id": "3300d3ff5406efdf74bbba5d46a8b156f99c455df7d70dedd3370433a0105ca9",
+            "basename": "filename.xml",
+        }
+
+        user = User()
+        xml_with_pre = _get_xml_with_pre()
+        result = models.XMLDocPid.register(
+            xml_with_pre=xml_with_pre,
+            filename="filename.xml",
+            user=user,
+            push_xml_content=mock_push,
+            synchronized=None,
+        )
+        self.assertEqual(len(result), 4)
+        self.assertEqual(expected["error_type"], result["error_type"])
+        self.assertEqual(expected["error_message"], result["error_message"])
+        self.assertEqual(expected["id"], result["id"])
+        self.assertEqual(expected["basename"], result["basename"])
