@@ -8,7 +8,7 @@ from shutil import copyfile
 from django.core.files.base import ContentFile
 from django.db import models
 from django.utils.translation import gettext as _
-from wagtail.admin.edit_handlers import FieldPanel
+from wagtail.admin.panels import FieldPanel
 
 from core.forms import CoreAdminModelForm
 from core.models import CommonControlField
@@ -81,12 +81,9 @@ class PidProviderBadRequest(CommonControlField):
 
     panels = [
         FieldPanel("basename"),
-        FieldPanel("uri"),
         FieldPanel("xml"),
         FieldPanel("error_type"),
         FieldPanel("error_message"),
-        FieldPanel("created"),
-        FieldPanel("creator"),
     ]
 
     base_form_class = CoreAdminModelForm
