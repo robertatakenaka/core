@@ -208,7 +208,7 @@ class XMLVersion(MinioFile):
     """
 
     xml_doc_pid = models.ForeignKey(
-        "XMLDocPid", on_delete=models.SET_NULL, null=True, blank=True
+        "PidProviderXML", on_delete=models.SET_NULL, null=True, blank=True
     )
     finger_print = models.CharField(max_length=65, null=True, blank=True)
 
@@ -262,7 +262,7 @@ class XMLRelatedItem(CommonControlField):
             return obj
 
 
-class XMLDocPid(CommonControlField):
+class PidProviderXML(CommonControlField):
     """
     Representação de atributos do Doc que o identifique unicamente
     """
@@ -332,7 +332,7 @@ class XMLDocPid(CommonControlField):
         ]
 
     def __str__(self):
-        return self.pkg_name or self.v3 or "XMLDocPid sem ID"
+        return self.pkg_name or self.v3 or "PidProviderXML sem ID"
 
     @property
     def data(self):
@@ -388,8 +388,8 @@ class XMLDocPid(CommonControlField):
         try:
             self._xml_with_pre = get_xml_with_pre_from_uri(self.xml_uri)
         except Exception as e:
-            raise exceptions.XMLDocPidXMLWithPreError(
-                _("Unable to get xml with pre (XMLDocPid) {}: {} {}").format(
+            raise exceptions.PidProviderXMLWithPreError(
+                _("Unable to get xml with pre (PidProviderXML) {}: {} {}").format(
                     self.xml_uri, type(e), e
                 )
             )
@@ -462,7 +462,7 @@ class XMLDocPid(CommonControlField):
         """
         try:
             pkg_name, ext = os.path.splitext(os.path.basename(filename))
-            logging.info(f"XMLDocPid.register {filename}")
+            logging.info(f"PidProviderXML.register {filename}")
 
             # adaptador do xml with pre
             xml_adapter = xml_sps_adapter.PidProviderXMLAdapter(xml_with_pre)
@@ -505,7 +505,7 @@ class XMLDocPid(CommonControlField):
             return data
 
         except (
-            exceptions.ForbiddenXMLDocPidRegistrationError,
+            exceptions.ForbiddenPidProviderXMLRegistrationError,
             exceptions.NotEnoughParametersToGetDocumentRecordError,
             exceptions.QueryDocumentMultipleObjectsReturnedError,
             MinioStorageFPutContentError,
@@ -543,7 +543,7 @@ class XMLDocPid(CommonControlField):
         pois está tentando registrar uma versão desatualizada
         """
         if xml_adapter.is_aop and registered and not registered.is_aop:
-            raise exceptions.ForbiddenXMLDocPidRegistrationError(
+            raise exceptions.ForbiddenPidProviderXMLRegistrationError(
                 _(
                     "The XML content is an ahead of print version "
                     "but the document {} is already published in an issue"
@@ -650,7 +650,7 @@ class XMLDocPid(CommonControlField):
 
         Returns
         -------
-        None or XMLDocPid
+        None or PidProviderXML
 
         Raises
         ------
@@ -688,8 +688,8 @@ class XMLDocPid(CommonControlField):
             )
         except Exception as e:
             LOGGER.exception(e)
-            raise exceptions.XMLDocPidCreateError(
-                _("XMLDocPid create error: {} {} {}").format(
+            raise exceptions.PidProviderXMLCreateError(
+                _("PidProviderXML create error: {} {} {}").format(
                     type(e),
                     e,
                     xml_adapter,
@@ -709,8 +709,8 @@ class XMLDocPid(CommonControlField):
             return self
         except Exception as e:
             LOGGER.exception(e)
-            raise exceptions.XMLDocPidUpdateError(
-                _("XMLDocPid Update data error: {} {} {}").format(
+            raise exceptions.PidProviderXMLUpdateError(
+                _("PidProviderXML Update data error: {} {} {}").format(
                     type(e),
                     e,
                     xml_adapter,

@@ -2,7 +2,7 @@ class APIPidProviderPostError(Exception):
     ...
 
 
-class ForbiddenXMLDocPidRegistrationError(Exception):
+class ForbiddenPidProviderXMLRegistrationError(Exception):
     ...
 
 
@@ -18,13 +18,13 @@ class QueryDocumentMultipleObjectsReturnedError(Exception):
     ...
 
 
-class XMLDocPidCreateError(Exception):
+class PidProviderXMLCreateError(Exception):
     ...
 
 
-class XMLDocPidUpdateError(Exception):
+class PidProviderXMLUpdateError(Exception):
     ...
 
 
-class XMLDocPidXMLWithPreError(Exception):
+class PidProviderXMLWithPreError(Exception):
     ...

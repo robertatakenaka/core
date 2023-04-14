@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from unittest import mock
 from unittest.mock import Mock, call, patch
 
@@ -75,7 +76,7 @@ def _create_xml_adapter__aop():
     return xml_adapter
 
 
-class XMLDocPidValidateQueryParamsTest(TestCase):
+class PidProviderXMLValidateQueryParamsTest(TestCase):
     def setUp(self):
         self.article_params = {
             "z_article_titles_texts": "TITLES",
@@ -103,20 +104,20 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
 
     def test_validate_query_params_all_present(self):
         params = self.article_params
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_all_present_plus_issue_params(self):
         params = self.article_params
         params.update(self.issue_params)
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_issue_params_only(self):
         params = {}
         params.update(self.issue_params)
         with self.assertRaises(exceptions.NotEnoughParametersToGetDocumentRecordError):
-            result = models.XMLDocPid.validate_query_params(params)
+            result = models.PidProviderXML.validate_query_params(params)
 
     def test_validate_query_params_journal_issns_absence(self):
         params = self.article_params
@@ -124,7 +125,7 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
         del params["journal__issn_print"]
         del params["journal__issn_electronic"]
         with self.assertRaises(exceptions.NotEnoughParametersToGetDocumentRecordError):
-            result = models.XMLDocPid.validate_query_params(params)
+            result = models.PidProviderXML.validate_query_params(params)
 
     def test_validate_query_params_pub_year_absence(self):
         params = self.article_params
@@ -132,27 +133,27 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
         del params["article_pub_year"]
         del params["issue__pub_year"]
         with self.assertRaises(exceptions.NotEnoughParametersToGetDocumentRecordError):
-            result = models.XMLDocPid.validate_query_params(params)
+            result = models.PidProviderXML.validate_query_params(params)
 
     def test_validate_query_params_main_doi_absence(self):
         params = self.article_params
         params.update(self.issue_params)
         del params["main_doi"]
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_fpage_absence(self):
         params = self.article_params
         params.update(self.issue_params)
         del params["fpage"]
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_elocation_id_absence(self):
         params = self.article_params
         params.update(self.issue_params)
         del params["elocation_id"]
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_main_doi_fpage_elocation_id_absence(self):
@@ -161,7 +162,7 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
         del params["main_doi"]
         del params["fpage"]
         del params["elocation_id"]
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_z_surnames_id_absence(self):
@@ -171,7 +172,7 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
         del params["fpage"]
         del params["elocation_id"]
         del params["z_surnames"]
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_z_collab_id_absence(self):
@@ -181,7 +182,7 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
         del params["fpage"]
         del params["elocation_id"]
         del params["z_collab"]
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_z_collab_id_absence(self):
@@ -191,7 +192,7 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
         del params["fpage"]
         del params["elocation_id"]
         del params["z_links"]
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_z_collab_id_absence(self):
@@ -201,7 +202,7 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
         del params["fpage"]
         del params["elocation_id"]
         del params["pkg_name"]
-        result = models.XMLDocPid.validate_query_params(params)
+        result = models.PidProviderXML.validate_query_params(params)
         self.assertTrue(result)
 
     def test_validate_query_params_z_collab_id_absence(self):
@@ -216,7 +217,7 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
         del params["z_links"]
 
         with self.assertRaises(exceptions.NotEnoughParametersToGetDocumentRecordError):
-            result = models.XMLDocPid.validate_query_params(params)
+            result = models.PidProviderXML.validate_query_params(params)
 
 
 @patch(
@@ -224,11 +225,11 @@ class XMLDocPidValidateQueryParamsTest(TestCase):
     new_callable=mock.PropertyMock,
 )
 @patch(
-    "pid_provider.models.XMLDocPid.validate_query_params",
+    "pid_provider.models.PidProviderXML.validate_query_params",
     return_value=True,
 )
-@patch("pid_provider.models.XMLDocPid.objects.get")
-class XMLDocPidQueryDocumentTest(TestCase):
+@patch("pid_provider.models.PidProviderXML.objects.get")
+class PidProviderXMLQueryDocumentTest(TestCase):
     def test_query_document_is_called_with_query_params(
         self,
         mock_get,
@@ -236,16 +237,16 @@ class XMLDocPidQueryDocumentTest(TestCase):
         mock_query_list,
     ):
         """
-        XMLDocPid._query_document is called with parameters returned by
-        XMLDocPid.query_list
+        PidProviderXML._query_document is called with parameters returned by
+        PidProviderXML.query_list
         """
         params_list = [
             {"key": "value"},
         ]
         mock_query_list.return_value = params_list
-        mock_get.side_effect = models.XMLDocPid.DoesNotExist
+        mock_get.side_effect = models.PidProviderXML.DoesNotExist
         xml_adapter = _get_xml_adapter()
-        result = models.XMLDocPid._query_document(xml_adapter)
+        result = models.PidProviderXML._query_document(xml_adapter)
         mock_get.assert_called_once_with(**{"key": "value"})
 
     def test_query_document_returns_none_if_document_does_not_exist(
@@ -258,9 +259,9 @@ class XMLDocPidQueryDocumentTest(TestCase):
             {"key": "value"},
         ]
         mock_query_list.return_value = params_list
-        mock_get.side_effect = models.XMLDocPid.DoesNotExist
+        mock_get.side_effect = models.PidProviderXML.DoesNotExist
         xml_adapter = _get_xml_adapter()
-        result = models.XMLDocPid._query_document(xml_adapter)
+        result = models.PidProviderXML._query_document(xml_adapter)
         self.assertIsNone(result)
 
     def test_query_document_returns_found_document(
@@ -273,10 +274,10 @@ class XMLDocPidQueryDocumentTest(TestCase):
             {"key": "value"},
         ]
         mock_query_list.return_value = params_list
-        mock_get.return_value = models.XMLDocPid()
+        mock_get.return_value = models.PidProviderXML()
         xml_adapter = _get_xml_adapter()
-        result = models.XMLDocPid._query_document(xml_adapter)
-        self.assertEqual(models.XMLDocPid, type(result))
+        result = models.PidProviderXML._query_document(xml_adapter)
+        self.assertEqual(models.PidProviderXML, type(result))
 
     def test_query_document_returns_found_item_at_the_second_round(
         self,
@@ -290,12 +291,12 @@ class XMLDocPidQueryDocumentTest(TestCase):
         ]
         mock_query_list.return_value = params_list
         mock_get.side_effect = [
-            models.XMLDocPid.DoesNotExist,
-            models.XMLDocPid(),
+            models.PidProviderXML.DoesNotExist,
+            models.PidProviderXML(),
         ]
         xml_adapter = _get_xml_adapter()
-        result = models.XMLDocPid._query_document(xml_adapter)
-        self.assertEqual(models.XMLDocPid, type(result))
+        result = models.PidProviderXML._query_document(xml_adapter)
+        self.assertEqual(models.PidProviderXML, type(result))
 
     def test_query_document_raises_query_document_error_because_multiple_objects_returned(
         self,
@@ -307,12 +308,12 @@ class XMLDocPidQueryDocumentTest(TestCase):
             {"key": "value"},
         ]
         mock_query_list.return_value = params_list
-        mock_get.side_effect = models.XMLDocPid.MultipleObjectsReturned
+        mock_get.side_effect = models.PidProviderXML.MultipleObjectsReturned
         with self.assertRaises(
             exceptions.QueryDocumentMultipleObjectsReturnedError
         ) as exc:
             xml_adapter = _get_xml_adapter()
-            result = models.XMLDocPid._query_document(xml_adapter)
+            result = models.PidProviderXML._query_document(xml_adapter)
 
     def test_query_document_raises_error(
         self,
@@ -321,8 +322,8 @@ class XMLDocPidQueryDocumentTest(TestCase):
         mock_query_list,
     ):
         """
-        XMLDocPid._query_document is called with parameters returned by
-        XMLDocPid.query_list
+        PidProviderXML._query_document is called with parameters returned by
+        PidProviderXML.query_list
         """
         params_list = [
             {"key": "value"},
@@ -334,12 +335,12 @@ class XMLDocPidQueryDocumentTest(TestCase):
 
         with self.assertRaises(exceptions.NotEnoughParametersToGetDocumentRecordError):
             xml_adapter = _get_xml_adapter()
-            result = models.XMLDocPid._query_document(xml_adapter)
+            result = models.PidProviderXML._query_document(xml_adapter)
 
 
-@patch("pid_provider.models.XMLDocPid.xml_uri", new_callable=mock.PropertyMock)
-@patch("pid_provider.models.XMLDocPid._query_document")
-class XMLDocPidGetRegisteredTest(TestCase):
+@patch("pid_provider.models.PidProviderXML.xml_uri", new_callable=mock.PropertyMock)
+@patch("pid_provider.models.PidProviderXML._query_document")
+class PidProviderXMLGetRegisteredTest(TestCase):
     def setUp(self):
         self.xml_with_pre = _get_xml_with_pre()
 
@@ -348,20 +349,26 @@ class XMLDocPidGetRegisteredTest(TestCase):
         mock_query_document,
         mock_xml_uri,
     ):
-        xml_doc_pid = models.XMLDocPid()
+        xml_doc_pid = models.PidProviderXML()
         xml_doc_pid.v2 = "registered_v2"
         xml_doc_pid.v3 = "registered_v3"
         xml_doc_pid.aop_pid = "registered_aop_pid"
+        xml_doc_pid.created = datetime(2023, 2, 20)
+        xml_doc_pid.updated = datetime(2023, 2, 20)
+
         mock_xml_uri.return_value = "registered_xml_uri"
 
         mock_query_document.return_value = xml_doc_pid
 
-        result = models.XMLDocPid.get_registered(self.xml_with_pre)
+        result = models.PidProviderXML.get_registered(self.xml_with_pre)
         expected = {
             "v3": "registered_v3",
             "v2": "registered_v2",
             "aop_pid": "registered_aop_pid",
             "xml_uri": "registered_xml_uri",
+            "article": None,
+            "created": '2023-02-20T00:00:00',
+            "updated": '2023-02-20T00:00:00',
         }
         self.assertDictEqual(expected, result)
 
@@ -372,7 +379,7 @@ class XMLDocPidGetRegisteredTest(TestCase):
     ):
         mock_query_document.return_value = None
 
-        result = models.XMLDocPid.get_registered(self.xml_with_pre)
+        result = models.PidProviderXML.get_registered(self.xml_with_pre)
         self.assertIsNone(result)
 
     def test_get_registered_returns_error_multiple_return(
@@ -384,7 +391,7 @@ class XMLDocPidGetRegisteredTest(TestCase):
             exceptions.QueryDocumentMultipleObjectsReturnedError
         )
 
-        result = models.XMLDocPid.get_registered(self.xml_with_pre)
+        result = models.PidProviderXML.get_registered(self.xml_with_pre)
         self.assertTrue("error" in result.keys() and len(result) == 1)
 
     def test_get_registered_returns_error_not_enough_params(
@@ -396,46 +403,46 @@ class XMLDocPidGetRegisteredTest(TestCase):
             exceptions.NotEnoughParametersToGetDocumentRecordError
         )
 
-        result = models.XMLDocPid.get_registered(self.xml_with_pre)
+        result = models.PidProviderXML.get_registered(self.xml_with_pre)
         self.assertTrue("error" in result.keys() and len(result) == 1)
 
 
-class XMLDocPidEvaluateRegistrationTest(TestCase):
+class PidProviderXMLEvaluateRegistrationTest(TestCase):
     def setUp(self):
         self.xml_adapter = _get_xml_adapter()
 
     def test_evaluate_registration_accepts_xml_is_aop_and_registered_is_aop(self):
-        registered = Mock(spec=models.XMLDocPid)
+        registered = Mock(spec=models.PidProviderXML)
         registered.is_aop = True
 
         self.xml_adapter.is_aop = True
 
-        result = models.XMLDocPid.evaluate_registration(self.xml_adapter, registered)
+        result = models.PidProviderXML.evaluate_registration(self.xml_adapter, registered)
         self.assertTrue(result)
 
     def test_evaluate_registration_accepts_xml_is_not_aop_and_registered_is_aop(self):
-        registered = Mock(spec=models.XMLDocPid)
+        registered = Mock(spec=models.PidProviderXML)
         registered.is_aop = True
 
         self.xml_adapter.is_aop = False
 
-        result = models.XMLDocPid.evaluate_registration(self.xml_adapter, registered)
+        result = models.PidProviderXML.evaluate_registration(self.xml_adapter, registered)
         self.assertTrue(result)
 
     def test_evaluate_registration_raises_error(self):
-        registered = Mock(spec=models.XMLDocPid)
+        registered = Mock(spec=models.PidProviderXML)
         registered.is_aop = False
 
         self.xml_adapter.is_aop = True
 
-        with self.assertRaises(exceptions.ForbiddenXMLDocPidRegistrationError):
-            result = models.XMLDocPid.evaluate_registration(
+        with self.assertRaises(exceptions.ForbiddenPidProviderXMLRegistrationError):
+            result = models.PidProviderXML.evaluate_registration(
                 self.xml_adapter, registered
             )
 
 
-@patch("pid_provider.models.XMLDocPid._get_unique_v2")
-class XMLDocPidAddV2Test(TestCase):
+@patch("pid_provider.models.PidProviderXML._get_unique_v2")
+class PidProviderXMLAddV2Test(TestCase):
     def _get_xml_adapter(self, v2=None, v3=None, aop_pid=None):
         v2 = (
             v2
@@ -470,60 +477,60 @@ class XMLDocPidAddV2Test(TestCase):
     #     self,
     #     mock_get_unique_v2,
     # ):
-    #     found = models.XMLDocPid()
+    #     found = models.PidProviderXML()
     #     found.v2 = "registered_v2"
 
     #     xml_adapter = self._get_xml_adapter(v2='xml_v2')
 
     #     mock_get_unique_v2.return_value = "generated_v2"
 
-    #     models.XMLDocPid._add_pid_v2(xml_adapter, found)
+    #     models.PidProviderXML._add_pid_v2(xml_adapter, found)
     #     self.assertEqual("registered_v2", xml_adapter.v2)
 
     def test_add_pid_v2_replace_xml_v2_because_its_value_is_invalid_length_is_not_23(
         self,
         mock_get_unique_v2,
     ):
-        found = models.XMLDocPid()
+        found = models.PidProviderXML()
         found.v2 = None
 
         xml_adapter = self._get_xml_adapter(v2="bad_size_not_23")
 
         mock_get_unique_v2.return_value = "S1806-37132022000201100"
 
-        models.XMLDocPid._add_pid_v2(xml_adapter, found)
+        models.PidProviderXML._add_pid_v2(xml_adapter, found)
         self.assertEqual("S1806-37132022000201100", xml_adapter.v2)
 
     def test_add_pid_v2_keeps_xml_v2(
         self,
         mock_get_unique_v2,
     ):
-        found = models.XMLDocPid()
+        found = models.PidProviderXML()
         found.v2 = None
 
         xml_adapter = self._get_xml_adapter(v2="S1806-37132022000199999")
 
         mock_get_unique_v2.return_value = "S1806-37132022000300001"
 
-        models.XMLDocPid._add_pid_v2(xml_adapter, found)
+        models.PidProviderXML._add_pid_v2(xml_adapter, found)
         self.assertEqual("S1806-37132022000199999", xml_adapter.v2)
 
     def test_add_pid_v2_uses_unique_v2(
         self,
         mock_get_unique_v2,
     ):
-        found = models.XMLDocPid()
+        found = models.PidProviderXML()
         found.v2 = None
 
         xml_adapter = self._get_xml_adapter()
 
         mock_get_unique_v2.return_value = "S1806-37132022000201100"
 
-        models.XMLDocPid._add_pid_v2(xml_adapter, found)
+        models.PidProviderXML._add_pid_v2(xml_adapter, found)
         self.assertEqual("S1806-37132022000201100", xml_adapter.v2)
 
 
-class XMLDocPidAddAopPidTest(TestCase):
+class PidProviderXMLAddAopPidTest(TestCase):
     def _get_xml_adapter(self, v2=None, v3=None, aop_pid=None):
         v2 = (
             v2
@@ -556,29 +563,29 @@ class XMLDocPidAddAopPidTest(TestCase):
     def test_add_aop_pid_uses_registered_aop_pid(
         self,
     ):
-        found = models.XMLDocPid()
+        found = models.PidProviderXML()
         found.aop_pid = "12345678901234567890aop"
 
         xml_adapter = self._get_xml_adapter(aop_pid="xml_aop_pid")
 
-        models.XMLDocPid._add_aop_pid(xml_adapter, found)
+        models.PidProviderXML._add_aop_pid(xml_adapter, found)
         self.assertEqual("12345678901234567890aop", xml_adapter.aop_pid)
 
     def test_add_aop_pid_does_not_replace_by_none(
         self,
     ):
-        found = models.XMLDocPid()
+        found = models.PidProviderXML()
         found.aop_pid = None
 
         xml_adapter = self._get_xml_adapter(aop_pid="xml_aop_pid")
 
-        models.XMLDocPid._add_aop_pid(xml_adapter, found)
+        models.PidProviderXML._add_aop_pid(xml_adapter, found)
         self.assertEqual("xml_aop_pid", xml_adapter.aop_pid)
 
 
-@patch("pid_provider.models.XMLDocPid._is_registered_pid")
-@patch("pid_provider.models.XMLDocPid._get_unique_v3")
-class XMLDocPidAddPidV3Test(TestCase):
+@patch("pid_provider.models.PidProviderXML._is_registered_pid")
+@patch("pid_provider.models.PidProviderXML._get_unique_v3")
+class PidProviderXMLAddPidV3Test(TestCase):
     def _get_xml_adapter(self, v2=None, v3=None, aop_pid=None):
         v2 = (
             v2
@@ -613,12 +620,12 @@ class XMLDocPidAddPidV3Test(TestCase):
         mock__get_unique_v3,
         mock__is_registered_pid,
     ):
-        found = models.XMLDocPid()
+        found = models.PidProviderXML()
         found.v3 = "123456789012345678901v3"
 
         xml_adapter = self._get_xml_adapter(v3="xml_v3")
 
-        models.XMLDocPid._add_pid_v3(xml_adapter, found)
+        models.PidProviderXML._add_pid_v3(xml_adapter, found)
         self.assertEqual("123456789012345678901v3", xml_adapter.v3)
 
     def test_add_pid_v3_replaced_by_generated(
@@ -633,7 +640,7 @@ class XMLDocPidAddPidV3Test(TestCase):
 
         xml_adapter = self._get_xml_adapter(v3="xml_v3")
 
-        models.XMLDocPid._add_pid_v3(xml_adapter, found)
+        models.PidProviderXML._add_pid_v3(xml_adapter, found)
         self.assertEqual("gen456789012345678901v3", xml_adapter.v3)
 
     def test_add_pid_v3_keeps_xml_v3(
@@ -648,14 +655,14 @@ class XMLDocPidAddPidV3Test(TestCase):
 
         xml_adapter = self._get_xml_adapter(v3="xml456789012345678901v3")
 
-        models.XMLDocPid._add_pid_v3(xml_adapter, found)
+        models.PidProviderXML._add_pid_v3(xml_adapter, found)
         self.assertEqual("xml456789012345678901v3", xml_adapter.v3)
 
 
-@patch("pid_provider.models.XMLDocPid.current_version", new_callable=mock.PropertyMock)
-class XMLDocPidIsEqualToTest(TestCase):
+@patch("pid_provider.models.PidProviderXML.current_version", new_callable=mock.PropertyMock)
+class PidProviderXMLIsEqualToTest(TestCase):
     def test_is_equal_to_returns_false(self, mock_last_version):
-        registered = models.XMLDocPid()
+        registered = models.PidProviderXML()
 
         xml_adapter = _get_xml_adapter()
 
@@ -672,7 +679,7 @@ class XMLDocPidIsEqualToTest(TestCase):
 
         xml_adapter = _get_xml_adapter()
 
-        registered = models.XMLDocPid()
+        registered = models.PidProviderXML()
         result = registered.is_equal_to(xml_adapter)
         self.assertTrue(result)
 
@@ -686,8 +693,8 @@ def mock_push(
     return {"uri": "URI"}
 
 
-@patch("pid_provider.models.XMLDocPid.add_version")
-class XMLDocPidPushXMLContentTest(TestCase):
+@patch("pid_provider.models.PidProviderXML.add_version")
+class PidProviderXMLPushXMLContentTest(TestCase):
     def test_push_xml_content_results_ok(
         self,
         mock_version_add,
@@ -699,7 +706,7 @@ class XMLDocPidPushXMLContentTest(TestCase):
         )
 
         xml_adapter = _get_xml_adapter()
-        registered = models.XMLDocPid()
+        registered = models.PidProviderXML()
         filename = "filename.xml"
         result = registered.push_xml_content(
             xml_adapter, user, push_xml_content, filename
@@ -739,14 +746,14 @@ class XMLDocPidPushXMLContentTest(TestCase):
     ),
 )
 @patch("pid_provider.models.utcnow", return_value="2020-02-02")
-@patch("pid_provider.models.XMLDocPid.add_version")
-@patch("pid_provider.models.XMLDocPid._add_related_item")
+@patch("pid_provider.models.PidProviderXML.add_version")
+@patch("pid_provider.models.PidProviderXML._add_related_item")
 @patch("pid_provider.models.XMLVersion.save")
-@patch("pid_provider.models.XMLDocPid.save")
+@patch("pid_provider.models.PidProviderXML.save")
 @patch("pid_provider.models.XMLRelatedItem.save")
 @patch("pid_provider.models.XMLIssue.save")
 @patch("pid_provider.models.XMLJournal.save")
-class XMLDocPidAddDataTest(TestCase):
+class PidProviderXMLAddDataTest(TestCase):
     def test_add_data_sets_registered_aop_data(
         self,
         mock_journal_save,
@@ -766,7 +773,7 @@ class XMLDocPidAddDataTest(TestCase):
     ):
         user = User()
         xml_adapter = _create_xml_adapter__aop()
-        registered = models.XMLDocPid()
+        registered = models.PidProviderXML()
         registered._add_data(xml_adapter, user, "data-pkg_name")
 
         self.assertEqual("data-issn-e", registered.journal.issn_electronic)
@@ -821,7 +828,7 @@ class XMLDocPidAddDataTest(TestCase):
     ):
         user = User()
         xml_adapter = _get_xml_adapter_with_issue_data()
-        registered = models.XMLDocPid()
+        registered = models.PidProviderXML()
         registered._add_data(xml_adapter, user, "data-pkg_name")
 
         self.assertEqual("data-issn-e", registered.journal.issn_electronic)
@@ -862,10 +869,10 @@ class XMLDocPidAddDataTest(TestCase):
 
 
 @patch("pid_provider.models.utcnow", side_effect=["2020-02-02", "2020-02-03"])
-@patch("pid_provider.models.XMLDocPid.add_version")
-@patch("pid_provider.models.XMLDocPid._add_data")
-@patch("pid_provider.models.XMLDocPid.save")
-class XMLDocPidCreateTest(TestCase):
+@patch("pid_provider.models.PidProviderXML.add_version")
+@patch("pid_provider.models.PidProviderXML._add_data")
+@patch("pid_provider.models.PidProviderXML.save")
+class PidProviderXMLCreateTest(TestCase):
     def test_create(
         self,
         mock_xmldocpid_save,
@@ -876,7 +883,7 @@ class XMLDocPidCreateTest(TestCase):
         user = User()
         xml_adapter = _get_xml_adapter()
         pkg_name = "filename"
-        registered = models.XMLDocPid._create(
+        registered = models.PidProviderXML._create(
             xml_adapter=xml_adapter,
             user=user,
             push_xml_content=mock_push,
@@ -899,10 +906,10 @@ class XMLDocPidCreateTest(TestCase):
 
 
 @patch("pid_provider.models.utcnow", return_value="2020-02-03")
-@patch("pid_provider.models.XMLDocPid.add_version")
-@patch("pid_provider.models.XMLDocPid._add_data")
-@patch("pid_provider.models.XMLDocPid.save")
-class XMLDocPidUpdateTest(TestCase):
+@patch("pid_provider.models.PidProviderXML.add_version")
+@patch("pid_provider.models.PidProviderXML._add_data")
+@patch("pid_provider.models.PidProviderXML.save")
+class PidProviderXMLUpdateTest(TestCase):
     def test_create(
         self,
         mock_xmldocpid_save,
@@ -913,7 +920,7 @@ class XMLDocPidUpdateTest(TestCase):
         user = User()
         xml_adapter = _get_xml_adapter()
         pkg_name = "filename"
-        registered = models.XMLDocPid()
+        registered = models.PidProviderXML()
         registered.created = "2020-02-02"
         registered.creator = user
 
@@ -940,10 +947,10 @@ class XMLDocPidUpdateTest(TestCase):
 
 
 @patch("pid_provider.models.utcnow", side_effect=["2020-02-02", "2020-02-03"])
-@patch("pid_provider.models.XMLDocPid.add_version")
-@patch("pid_provider.models.XMLDocPid._add_data")
+@patch("pid_provider.models.PidProviderXML.add_version")
+@patch("pid_provider.models.PidProviderXML._add_data")
 @patch("pid_provider.models.PidProviderBadRequest.save")
-class XMLDocPidRegisterTest(TestCase):
+class PidProviderXMLRegisterTest(TestCase):
     def test_register_register_bad_request_and_returns_error(
         self,
         mock_xmldocpid_save,
@@ -960,7 +967,7 @@ class XMLDocPidRegisterTest(TestCase):
 
         user = User()
         xml_with_pre = _get_xml_with_pre()
-        result = models.XMLDocPid.register(
+        result = models.PidProviderXML.register(
             xml_with_pre=xml_with_pre,
             filename="filename.xml",
             user=user,
