@@ -102,8 +102,6 @@ class Language(CommonControlField):
     name = models.TextField(_("Language Name"), blank=True, null=True)
     code2 = models.TextField(_("Language code 2"), blank=True, null=True)
 
-    autocomplete_search_field = "code2"
-
     def autocomplete_label(self):
         return str(self)
 
@@ -112,10 +110,14 @@ class Language(CommonControlField):
         verbose_name_plural = _("Languages")
 
     def __unicode__(self):
-        return self.code2 or "idioma ausente / não informado"
+        if not self.name and not self.code2:
+            return str(None)
+        return f"{self.name} | {self.code2}"
 
     def __str__(self):
-        return self.code2 or "idioma ausente / não informado"
+        if not self.name and not self.code2:
+            return str(None)
+        return f"{self.name} | {self.code2}"
 
     @classmethod
     def load(cls, user):
