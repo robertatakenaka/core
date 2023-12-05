@@ -1,3 +1,4 @@
+import logging
 import re
 import sys
 from datetime import datetime
@@ -201,42 +202,45 @@ def update_panel_institution(
 
     publisher = extract_value(publisher)
 
+    logging.info("-----")
+    logging.info(publisher)
     if isinstance(publisher, str):
         publisher = [publisher]
 
     if publisher:
         for p in publisher:
             if p:
+
+                logging.info(f"Publisher : {p}")
+
                 journal.contact_name = p
-                publisher = Publisher.create_or_update(
-                    inst_name=p,
-                    user=user,
-                    location=location,
-                    url=None,
-                    inst_acronym=None,
+                publisher_ = Publisher.create_or_update(
+                    user,
+                    name=p,
+                    acronym=None,
                     level_1=None,
                     level_2=None,
                     level_3=None,
-                    official=None,
-                    is_official=None,
+                    location=location,
+                    url=None,
+                    declared_name=None,
                 )
                 publisher_history = PublisherHistory.get_or_create(
-                    institution=publisher,
+                    institution=publisher_,
                     user=user,
                 )
                 publisher_history.journal = journal
                 publisher_history.save()
                 owner = Owner.create_or_update(
-                    inst_name=p,
-                    user=user,
-                    location=location,
-                    url=None,
-                    inst_acronym=None,
+                    user,
+                    name=p,
+                    acronym=None,
                     level_1=None,
                     level_2=None,
                     level_3=None,
-                    official=None,
-                    is_official=None,
+                    location=location,
+                    url=None,
+                    declared_name=None,
                 )
                 owner_history = OwnerHistory.get_or_create(
                     institution=owner,
@@ -448,15 +452,13 @@ def get_or_create_sponsor(sponsor, journal, user):
             ## CNPq - Conselho Nacional de Desenvolvimento Científico e Tecnológico (PIEB)
             if name:
                 sponsor = Sponsor.create_or_update(
-                    inst_name=name,
-                    user=user,
-                    inst_acronym=None,
+                    user,
+                    name=name,
+                    acronym=None,
                     level_1=None,
                     level_2=None,
                     level_3=None,
                     location=None,
-                    official=None,
-                    is_official=None,
                     url=None,
                 )
                 sponsor_history = SponsorHistory.get_or_create(
@@ -704,15 +706,13 @@ def get_or_create_copyright_holder(journal, copyright_holder_name, user):
     copyright_holder_name = extract_value(copyright_holder_name)
     if copyright_holder_name:
         copyright_holder = CopyrightHolder.create_or_update(
-            inst_name=copyright_holder_name,
-            user=user,
-            inst_acronym=None,
+            user,
+            name=copyright_holder_name,
+            acronym=None,
             level_1=None,
             level_2=None,
             level_3=None,
             location=None,
-            official=None,
-            is_official=None,
             url=None,
         )
         copyright_holder_history = CopyrightHolderHistory.get_or_create(
@@ -721,3 +721,9 @@ def get_or_create_copyright_holder(journal, copyright_holder_name, user):
         )
         copyright_holder_history.journal = journal
         copyright_holder_history.save()
+        try:
+            logging.info(
+                f"institution.id : {copyright_holder.institution_identification.name}")
+        except Exception as e:
+            logging.info(
+                f"xxxxx: {type(copyright_holder.institution_identification)}")

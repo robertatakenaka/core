@@ -10,8 +10,105 @@ from wagtail.contrib.modeladmin.options import (
 from wagtail.contrib.modeladmin.views import CreateView
 
 from .button_helpers import ScimagoHelper
-from .models import Institution, Scimago, ScimagoFile, Sponsor
+from .models import (
+    InstitutionIdentification,
+    Institution,
+    Decl2Std,
+    Scimago,
+    ScimagoFile,
+    Sponsor,
+)
 from .views import import_file_scimago, validate_scimago
+
+
+class InstitutionIdentificationCreateView(CreateView):
+    def form_valid(self, form):
+        self.object = form.save_all(self.request.user)
+        return HttpResponseRedirect(self.get_success_url())
+
+
+class InstitutionIdentificationAdmin(ModelAdmin):
+    model = InstitutionIdentification
+    create_view_class = InstitutionIdentificationCreateView
+    menu_label = _("InstitutionIdentification")
+    menu_icon = "folder"
+    menu_order = 800
+    add_to_settings_menu = False  # or True to add your model to the Settings sub-menu
+    exclude_from_explorer = (
+        False  # or True to exclude pages of this type from Wagtail's explorer view
+    )
+    list_display = (
+        "name",
+        "acronym",
+        "institution_type",
+        "is_official",
+        "updated",
+        "created",
+    )
+    list_filter = (
+        "institution_type",
+        "is_official",
+    )
+    search_fields = (
+        "name",
+        "acronym",
+    )
+    list_export = (
+        "name",
+        "acronym",
+        "institution_type",
+        "is_official",
+        "updated",
+        "created",
+        "creator",
+        "updated",
+        "updated_by",
+    )
+    export_filename = "institution_institution_identification"
+
+
+class Decl2StdCreateView(CreateView):
+    def form_valid(self, form):
+        self.object = form.save_all(self.request.user)
+        return HttpResponseRedirect(self.get_success_url())
+
+
+class Decl2StdAdmin(ModelAdmin):
+    model = Decl2Std
+    create_view_class = Decl2StdCreateView
+    menu_label = _("Declared Institution")
+    menu_icon = "folder"
+    menu_order = 800
+    add_to_settings_menu = False  # or True to add your model to the Settings sub-menu
+    exclude_from_explorer = (
+        False  # or True to exclude pages of this type from Wagtail's explorer view
+    )
+    list_display = (
+        "name",
+        "acronym",
+        "std_name",
+        "std_acronym",
+        "updated",
+        "created",
+    )
+    search_fields = (
+        "name",
+        "acronym",
+        "std_name",
+        "std_acronym",
+    )
+    list_export = (
+        "name",
+        "acronym",
+        "std_name",
+        "std_acronym",
+        "updated",
+        "created",
+        "creator",
+        "updated",
+        "updated_by",
+    )
+    export_filename = "institution_declared_institution"
 
 
 class InstitutionCreateView(CreateView):
@@ -31,30 +128,36 @@ class InstitutionAdmin(ModelAdmin):
         False  # or True to exclude pages of this type from Wagtail's explorer view
     )
     list_display = (
-        "name",
-        "institution_type",
-        "creator",
-        "updated",
-        "created",
-        "updated_by",
-    )
-    search_fields = (
-        "name",
-        "institution_type",
-        "creator__username",
-        "updated",
-        "created",
-        "updated_by__username",
-    )
-    list_export = (
-        "name",
-        "institution_type",
+        "institution_identification",
+        "location",
         "level_1",
         "level_2",
         "level_3",
-        "creator",
         "updated",
         "created",
+    )
+    search_fields = (
+        "institution_identification__name",
+        "institution_identification__acronym",
+        "level_1",
+        "level_2",
+        "level_3",
+        "location__country__name",
+        "location__country__acronym",
+        "location__state__name",
+        "location__state__acronym",
+        "location__city__name",
+    )
+    list_export = (
+        "institution_identification__name",
+        "institution_identification__acronym",
+        "level_1",
+        "level_2",
+        "level_3",
+        "location",
+        "creator",
+        "created",
+        "updated",
         "updated_by",
     )
     export_filename = "institutions"
@@ -77,34 +180,37 @@ class SponsorAdmin(ModelAdmin):
         False  # or True to exclude pages of this type from Wagtail's explorer view
     )
     list_display = (
-        "name",
-        "acronym",
+        "institution_identification",
+        "location",
         "level_1",
         "level_2",
         "level_3",
-        "location",
-        "official",
-        "is_official",
+        "updated",
+        "created",
     )
     search_fields = (
-        "name",
-        "acronym",
+        "institution_identification__name",
+        "institution_identification__acronym",
         "level_1",
         "level_2",
         "level_3",
-        "location",
-        "official",
-        "is_official",
+        "location__country__name",
+        "location__country__acronym",
+        "location__state__name",
+        "location__state__acronym",
+        "location__city__name",
     )
     list_export = (
-        "name",
-        "acronym",
+        "institution_identification__name",
+        "institution_identification__acronym",
         "level_1",
         "level_2",
         "level_3",
         "location",
-        "official",
-        "is_official",
+        "creator",
+        "created",
+        "updated",
+        "updated_by",
     )
     export_filename = "sponsor"
 
@@ -158,7 +264,14 @@ class InstitutionsAdminGroup(ModelAdminGroup):
     menu_label = _("Institutions")
     menu_icon = "folder-open-inverse"  # change as required
     menu_order = 7
-    items = (InstitutionAdmin, SponsorAdmin, ScimagoAdmin, ScimagoFileAdmin)
+    items = (
+        Decl2StdAdmin,
+        InstitutionIdentificationAdmin,
+        InstitutionAdmin,
+        SponsorAdmin,
+        ScimagoAdmin,
+        ScimagoFileAdmin,
+    )
 
 
 modeladmin_register(InstitutionsAdminGroup)

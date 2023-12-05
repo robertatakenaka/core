@@ -98,6 +98,7 @@ def standardize_acronym_and_name(
         indica se é esperado 1 instituição ou várias
 
     """
+    logging.info(f"texto: {original}")
     parts_separators = PARTS_SEP_FOR_INST
     items_separators = ITEMS_SEP_FOR_INST
 
@@ -108,9 +109,11 @@ def standardize_acronym_and_name(
         splitted_text = list(get_splitted_text_multiple(original))
         logging.info(f"get_splitted_text_multiple: {splitted_text}")
         for parts in splitted_text:
-
             if len(parts) == 2:
-                name, acron = parts
+                if len(parts[0]) > len(parts[1]):
+                    name, acron = parts
+                else:
+                    acron, name = parts
                 acrons.append(acron)
                 names.append(name)
             elif len(parts) == 1:
@@ -135,7 +138,10 @@ def standardize_acronym_and_name(
         if not parts:
             return
         if len(parts) == 2:
-            name, acron = parts
+            if len(parts[0]) > len(parts[1]):
+                name, acron = parts
+            else:
+                acron, name = parts
             acrons.append(acron)
             names.append(name)
         elif len(parts) == 1:

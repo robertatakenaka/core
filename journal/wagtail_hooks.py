@@ -165,6 +165,7 @@ class IndexedAtAdminGroup(ModelAdminGroup):
 
 # modeladmin_register(IndexedAtAdminGroup)
 
+
 class WebOfKnowledgeAdmin(ModelAdmin):
     model = models.WebOfKnowledge
     menu_icon = "folder"
@@ -205,12 +206,9 @@ class WosAreaAdmin(ModelAdmin):
     menu_order = 400
     add_to_settings_menu = False
     exclude_from_explorer = False
-    list_display = (
-        "value",
-    )
-    search_fields = (
-        "value",
-    )    
+    list_display = ("value",)
+    search_fields = ("value",)
+
 
 class ListCodesAdminGroup(ModelAdminGroup):
     menu_label = "List of codes"
@@ -222,19 +220,21 @@ class ListCodesAdminGroup(ModelAdminGroup):
         WosAreaAdmin,
     )
 
+
 modeladmin_register(ListCodesAdminGroup)
 
 # TODO
-# Futuramente mudar para JournalAdminGroup 
+# Futuramente mudar para JournalAdminGroup
 # com permissoes de visualizacao restrita
 class AMJournalAdmin(ModelAdmin):
     model = models.AMJournal
     menu_label = "AM Journal"
     menu_icon = "folder"
     menu_order = 1200
-    list_display = ("scielo_issn", "collection") 
+    list_display = ("scielo_issn", "collection")
     list_filter = ("collection",)
     search_fields = ("scielo_issn",)
+
 
 modeladmin_register(AMJournalAdmin)
 

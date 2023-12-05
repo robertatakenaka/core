@@ -121,6 +121,7 @@ LOCAL_APPS = [
     "book",
     "collection",
     "core",
+    "editorialboard",
     "files_storage",
     "institution",
     "issue",

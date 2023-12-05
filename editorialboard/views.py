@@ -68,28 +68,21 @@ def import_file_ebm(request):
     file_path = file_upload.attachment.file.path
 
     try:
-        with open(file_path, "r") as csvfile:
-            data = csv.DictReader(csvfile, delimiter=";")
-            for line, row in enumerate(data):
-                given_names = row["Nome do membro"]
-                last_name = row["Sobrenome"]
-                ed = EditorialBoardMember()
-                ed.get_or_create(
-                    row["Periódico"],
-                    row["Cargo / instância do membro"],
-                    row["Data"],
-                    row["Email"],
-                    row["Institution"],
-                    given_names,
-                    last_name,
-                    row["Suffix"],
-                    row["ORCID iD"],
-                    row["CV Lattes"],
-                    row["Gender"],
-                    row["Gender status"],
-                    request.user,
-                )
-                # ,User)
+        column_labels = {
+            "journal": "Periódico",
+            "year": "Data",
+            "member": "Nome do membro",
+            "role": "Cargo / instância do membro",
+            "institution": "Instituição",
+            "division": "Departamento",
+            "city": "Cidade",
+            "state": "Estado",
+            "country": "País",
+            "lattes": "CV Lattes",
+            "orcid": "ORCID iD",
+            "email": "Email",
+        }
+        EditorialBoard.load_from_csv_file(request.user, file_path, column_labels)
     except Exception as ex:
         messages.error(request, _("Import error: %s, Line: %s") % (ex, str(line + 2)))
     else:

@@ -1,243 +1,41 @@
+import logging
+import csv
 import os
+from datetime import datetime
 
 from django.db import models
+from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 from modelcluster.fields import ParentalKey
 from modelcluster.models import ClusterableModel
-from wagtail.admin.panels import FieldPanel, InlinePanel, MultiFieldPanel
+from wagtail.admin.panels import FieldPanel, InlinePanel
 from wagtail.models import Orderable
 from wagtailautocomplete.edit_handlers import AutocompletePanel
 
 from core.choices import MONTHS
 from core.models import CommonControlField, Gender
-from institution.models import Institution, InstitutionHistory
+from core.forms import CoreAdminModelForm
+from core.utils.standardizer import remove_extra_spaces
+from location.models import Location
 from journal.models import Journal
-
-from . import choices
-from .forms import ResearcherForm
-
-
-class Researcher(ClusterableModel, CommonControlField):
-    """
-    Class that represent the Researcher
-    """
-
-    given_names = models.CharField(
-        _("Given names"), max_length=128, blank=True, null=True
-    )
-    last_name = models.CharField(_("Last name"), max_length=128, blank=True, null=True)
-    declared_name = models.CharField(
-        _("Declared Name"), max_length=255, blank=True, null=True
-    )
-    suffix = models.CharField(_("Suffix"), max_length=128, blank=True, null=True)
-    orcid = models.TextField(_("ORCID"), blank=True, null=True)
-    lattes = models.TextField(_("Lattes"), blank=True, null=True)
-    gender = models.ForeignKey(Gender, blank=True, null=True, on_delete=models.SET_NULL)
-    gender_identification_status = models.CharField(
-        _("Gender identification status"),
-        max_length=255,
-        choices=choices.GENDER_IDENTIFICATION_STATUS,
-        null=True,
-        blank=True,
-    )
-
-    autocomplete_search_field = "given_names"
-
-    def autocomplete_label(self):
-        return str(self)
-
-    panels = [
-        FieldPanel("given_names"),
-        FieldPanel("last_name"),
-        FieldPanel("declared_name"),
-        FieldPanel("suffix"),
-        FieldPanel("orcid"),
-        FieldPanel("lattes"),
-        AutocompletePanel("gender"),
-        FieldPanel("gender_identification_status"),
-    ]
-
-    class Meta:
-        indexes = [
-            models.Index(
-                fields=[
-                    "given_names",
-                ]
-            ),
-            models.Index(
-                fields=[
-                    "last_name",
-                ]
-            ),
-            models.Index(
-                fields=[
-                    "orcid",
-                ]
-            ),
-            models.Index(
-                fields=[
-                    "lattes",
-                ]
-            ),
-        ]
-
-    @property
-    def get_full_name(self):
-        return f"{self.last_name}, {self.given_names}"
-
-    def __unicode__(self):
-        return "%s%s, %s (%s)" % (
-            self.last_name,
-            self.suffix and f" {self.suffix}" or "",
-            self.given_names,
-            self.orcid,
-        )
-
-    def __str__(self):
-        return "%s%s, %s (%s)" % (
-            self.last_name,
-            self.suffix and f" {self.suffix}" or "",
-            self.given_names,
-            self.orcid,
-        )
-
-    @classmethod
-    def get(
-        cls,
-        given_names,
-        last_name,
-        orcid,
-        declared_name,
-    ):
-        if orcid:
-            return cls.objects.get(orcid=orcid)
-        elif given_names or last_name:
-            return cls.objects.get(
-                given_names__iexact=given_names,
-                last_name__iexact=last_name,
-                orcid__isnull=True,
-            )
-        elif declared_name:
-            return cls.objects.get(declared_name=declared_name)
-        raise ValueError(
-            "Researcher.get requires orcid, given_names, last_names or declared_name parameters"
-        )
-
-    @classmethod
-    def create_or_update(
-        cls,
-        given_names,
-        last_name,
-        declared_name,
-        suffix,
-        orcid,
-        lattes,
-        email,
-        institution_name,
-        gender=None,
-        gender_identification_status=None,
-        user=None,
-    ):
-        try:
-            researcher = cls.get(
-                given_names=given_names,
-                last_name=last_name,
-                orcid=orcid,
-                declared_name=declared_name,
-            )
-            researcher.updated_by = user or researcher.updated_by
-        except cls.DoesNotExist:
-            researcher = cls()
-            researcher.creator = user
-            researcher.orcid = orcid
-
-        researcher.given_names = given_names or researcher.given_names
-        researcher.last_name = last_name or researcher.last_name
-        institution = None
-        if institution_name:
-            try:
-                institution = Institution.objects.get(name=institution_name)
-            except Institution.DoesNotExist:
-                pass
-
-        researcher.declared_name = declared_name or researcher.declared_name
-        researcher.suffix = suffix or researcher.suffix
-        researcher.lattes = lattes or researcher.lattes
-        ## TODO
-        ## Criar get_or_create para model gender e GenderIdentificationStatus
-        researcher.gender = gender or researcher.gender
-        researcher.gender_identification_status = (
-            gender_identification_status or researcher.gender_identification_status
-        )
-        researcher.save()
-
-        if email:
-            FieldEmail.objects.create(page=researcher, email=email)
-        if institution:
-            FieldAffiliation.objects.create(page=researcher, institution=institution)
-        return researcher
-
-    panels = [
-        FieldPanel("given_names"),
-        FieldPanel("last_name"),
-        FieldPanel("suffix"),
-        FieldPanel("orcid"),
-        FieldPanel("lattes"),
-        InlinePanel("page_email", label=_("Email")),
-        FieldPanel("gender"),
-        FieldPanel("gender_identification_status"),
-        InlinePanel("affiliation", label=_("Affiliation")),
-    ]
-
-    base_form_class = ResearcherForm
+from researcher.models import Researcher, Affiliation
+from editorialboard import choices
 
 
-class FieldEmail(Orderable):
-    page = ParentalKey(Researcher, on_delete=models.CASCADE, related_name="page_email")
-    email = models.EmailField(_("Email"), max_length=128, blank=True, null=True)
-
-
-class FieldAffiliation(Orderable, InstitutionHistory):
-    page = ParentalKey(Researcher, on_delete=models.CASCADE, related_name="affiliation")
-
-
-class EditorialBoardMember(models.Model):
-    journal = models.ForeignKey(
-        Journal, null=True, blank=True, related_name="+", on_delete=models.CASCADE
-    )
-    member = models.ForeignKey(
-        Researcher, null=True, blank=True, related_name="+", on_delete=models.CASCADE
-    )
+class DeclaredRoleModel(CommonControlField):
     role = models.CharField(
-        _("Role"), max_length=255, choices=choices.ROLE, null=False, blank=False
+        _("Role"), max_length=16, choices=choices.ROLE, null=True, blank=True
     )
-    initial_year = models.CharField(max_length=4, blank=True, null=True)
-    initial_month = models.CharField(
-        max_length=2, blank=True, null=True, choices=MONTHS
+    declared_role = models.CharField(
+        _("Declared Role"), max_length=128, null=True, blank=True
     )
-    final_year = models.CharField(max_length=4, blank=True, null=True)
-    final_month = models.CharField(max_length=2, blank=True, null=True, choices=MONTHS)
-
-    panels = [
-        AutocompletePanel("journal"),
-        AutocompletePanel("member"),
-        FieldPanel("role"),
-        FieldPanel("initial_year"),
-        FieldPanel("initial_month"),
-        FieldPanel("final_year"),
-        FieldPanel("final_month"),
-    ]
 
     class Meta:
+        unique_together = ["declared_role", "role"]
         indexes = [
             models.Index(
                 fields=[
-                    "journal",
-                ]
-            ),
-            models.Index(
-                fields=[
-                    "member",
+                    "declared_role",
                 ]
             ),
             models.Index(
@@ -247,64 +45,398 @@ class EditorialBoardMember(models.Model):
             ),
         ]
 
+    def __str__(self):
+        return f"{self.role} | {self.declared_role}"
+
+    @staticmethod
+    def autocomplete_custom_queryset_filter(any_value):
+        return DeclaredRoleModel.objects.filter(
+            Q(declared_role__icontains=any_value) | Q(role__icontains=any_value)
+        )
+
+    def autocomplete_label(self):
+        return f"{self.role} | {self.declared_role}"
+
     @classmethod
     def get_or_create(
-        self,
-        journal,
-        role,
-        initial_year,
-        email,
-        institution_name,
-        given_names,
-        last_name,
-        suffix,
-        orcid,
-        lattes,
-        gender,
-        gender_identification_status,
+        cls,
         user,
+        declared_role,
+        role,
     ):
+        if not declared_role:
+            raise ValueError(
+                "DeclaredRoleModel.create_or_update requires declared_role"
+            )
         try:
-            gender = Gender.objects.get(code=gender)
-        except Gender.DoesNotExist:
-            gender = None
+            declared_role = remove_extra_spaces(declared_role)
+            role = role or cls.get_std_role(declared_role)
+            return cls.objects.get(declared_role=declared_role, role=role)
+        except cls.DoesNotExist:
+            return cls.create(user, declared_role, role)
 
-        researcher_get = Researcher.get_or_create(
-            given_names,
-            last_name,
-            suffix,
-            orcid,
-            lattes,
-            email,
-            institution_name,
-            gender,
-            gender_identification_status,
-            user,
+    @classmethod
+    def create(
+        cls,
+        user,
+        declared_role,
+        role,
+    ):
+        if not declared_role:
+            raise ValueError(
+                "DeclaredRoleModel.create_or_update requires declared_role"
+            )
+        declared_role = remove_extra_spaces(declared_role)
+        role = role or cls.get_std_role(declared_role)
+        try:
+            obj = cls()
+            obj.creator = user
+            obj.declared_role = declared_role
+            obj.role = role
+            obj.save()
+            return obj
+        except IntegrityError as e:
+            return cls.objects.get(declared_role=declared_role, role=role)
+
+    @classmethod
+    def get_std_role(cls, declared_role):
+        # EDITOR_IN_CHIEF = "in-chief"
+        # EXECUTIVE_EDITOR = "executive"
+        # ASSOCIATE_EDITOR = "associate"
+        # TECHNICAL_TEAM = "technical"
+        declared_role = declared_role.lower()
+        if "chef" in declared_role:
+            return choices.EDITOR_IN_CHIEF
+        if len(declared_role.split()) == 1 or "exec" in declared_role:
+            return choices.EXECUTIVE_EDITOR
+        if (
+            "assoc" in declared_role
+            or "área" in declared_role
+            or "seç" in declared_role
+            or "cient" in declared_role
+            or "editor " in declared_role
+        ):
+            return choices.ASSOCIATE_EDITOR
+
+
+class EditorialBoard(CommonControlField, ClusterableModel):
+    journal = models.ForeignKey(
+        Journal, null=True, blank=True, related_name="+", on_delete=models.SET_NULL
+    )
+    initial_year = models.CharField(max_length=4, blank=True, null=True)
+    final_year = models.CharField(max_length=4, blank=True, null=True)
+
+    class Meta:
+        unique_together = [["journal", "initial_year", "final_year"]]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    "initial_year",
+                ]
+            ),
+            models.Index(
+                fields=[
+                    "final_year",
+                ]
+            ),
+        ]
+
+    panels = [
+        FieldPanel("initial_year"),
+        FieldPanel("final_year"),
+        InlinePanel("editorial_board_member"),
+    ]
+    base_form_class = CoreAdminModelForm
+
+    @staticmethod
+    def autocomplete_custom_queryset_filter(any_value):
+        return EditorialBoard.objects.filter(
+            Q(journal__title__icontains=any_value) |
+            Q(initial_year__icontains=any_value) |
+            Q(final_year__icontains=any_value)
         )
 
-        try:
-            journal_get = Journal.objects.get(title=journal)
-            return EditorialBoardMember.objects.get(
-                journal=journal_get, member=researcher_get
-            )
-        except Journal.DoesNotExist as e:
-            # TODO fazer tratamento apropriado para periódico não registrado
-            raise e
-        except EditorialBoardMember.DoesNotExist:
-            editorial_board_member = EditorialBoardMember()
-            editorial_board_member.member = researcher_get
-            editorial_board_member.journal = journal_get
-            editorial_board_member.role = role
-            editorial_board_member.initial_year = initial_year
-            editorial_board_member.creator = user
-            editorial_board_member.save()
-            return editorial_board_member
+    def autocomplete_label(self):
+        return str(self)
 
     def __str__(self):
-        return "%s (%s)" % (
-            self.member or "",
-            self.role or "",
+        return f"{self.journal.title} {self.initial_year}-{self.final_year}"
+
+    @classmethod
+    def get_or_create(
+        cls,
+        journal,
+        initial_year,
+        final_year,
+        user=None,
+    ):
+        try:
+            return cls.objects.get(
+                journal=journal,
+                initial_year=initial_year,
+                final_year=final_year,
+            )
+        except cls.DoesNotExist:
+            obj = cls()
+            obj.creator = user
+            obj.journal = journal
+            obj.initial_year = initial_year
+            obj.final_year = final_year
+            obj.save()
+            return obj
+
+    def get_members(self):
+        return EditorialBoardMember.objects.filter(
+            editorial_board_member__editorial_board=self,
         )
+
+
+class EditorialBoardMember(CommonControlField, Orderable):
+    editorial_board = ParentalKey(
+        EditorialBoard,
+        on_delete=models.SET_NULL,
+        related_name="editorial_board_member",
+        null=True,
+    )
+    researcher = models.ForeignKey(
+        Researcher, null=True, blank=True, related_name="+", on_delete=models.SET_NULL
+    )
+    role = models.ForeignKey(
+        DeclaredRoleModel, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    initial_month = models.CharField(
+        max_length=2, blank=True, null=True, choices=MONTHS, default="01"
+    )
+    final_month = models.CharField(
+        max_length=2, blank=True, null=True, choices=MONTHS, default="12")
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=[
+                    "editorial_board",
+                ]
+            ),
+            models.Index(
+                fields=[
+                    "role",
+                ]
+            ),
+        ]
+
+    panels = [
+        AutocompletePanel("editorial_board", read_only=True),
+        AutocompletePanel("researcher", read_only=True),
+        AutocompletePanel("role"),
+        FieldPanel("initial_month"),
+        FieldPanel("final_month"),
+    ]
+    base_form_class = CoreAdminModelForm
+
+    @classmethod
+    def get(
+        cls,
+        editorial_board,
+        researcher,
+        role,
+    ):
+        if editorial_board and researcher and role:
+            return cls.objects.get(
+                editorial_board=editorial_board,
+                researcher=researcher,
+                role=role,
+            )
+        raise ValueError("EditorialBoardMember.get requires editorial_board and member and role")
+
+    @classmethod
+    def create_or_update(
+        cls,
+        user,
+        editorial_board,
+        researcher,
+        initial_month,
+        final_month,
+        declared_role,
+        role,
+    ):
+        try:
+            obj_role = DeclaredRoleModel.get_or_create(
+                user, declared_role, role,
+            )
+            obj = cls.get(
+                editorial_board=editorial_board,
+                researcher=researcher,
+                role=obj_role,
+            )
+            obj.updated_by = user
+        except cls.DoesNotExist:
+            obj = cls()
+            obj.creator = user
+            obj.editorial_board = editorial_board
+            obj.researcher = researcher
+            obj.role = obj_role
+
+        obj.initial_month = initial_month or obj.initial_month
+        obj.final_month = final_month or obj.final_month
+        obj.role = obj_role or obj.role
+        obj.save()
+        return obj
+
+    @classmethod
+    def load(cls, user, file_path, column_labels=None):
+        """
+            "journal": "Periódico",
+            "year": "Data",
+            "member": "Nome do membro",
+            "role": "Cargo / instância do membro",
+            "institution": "Instituição",
+            "division": "Departamento",
+            "city": "Cidade",
+            "state": "Estado",
+            "country": "País",
+            "lattes": "CV Lattes",
+            "orcid": "ORCID iD",
+            "email": "Email",
+        """
+        column_labels = column_labels or {
+            "journal": "Periódico",
+            "year": "Data",
+            "member": "Nome do membro",
+            "role": "Cargo / instância do membro",
+            "institution": "Instituição",
+            "division": "Departamento",
+            "city": "Cidade",
+            "state": "Estado",
+            "country": "País",
+            "lattes": "CV Lattes",
+            "orcid": "ORCID iD",
+            "email": "Email",
+        }
+
+        with open(file_path, "r") as csvfile:
+            rows = csv.DictReader(
+                csvfile, delimiter=",", fieldnames=list(column_labels.values())
+            )
+            for line, row in enumerate(rows):
+                cls.load_row(
+                    user=user,
+                    journal_title=row.get(column_labels["journal"]),
+                    year=row.get(column_labels["year"]),
+                    fullname=row.get(column_labels["member"]),
+                    declared_role=row.get(column_labels["role"]),
+                    institution_name=row.get(column_labels["institution"]),
+                    institution_div1=row.get(column_labels["division"]),
+                    # institution_div2=row.get("div2"),
+                    institution_city=row.get(column_labels["city"]),
+                    institution_state=row.get(column_labels["state"]),
+                    institution_country=row.get(column_labels["country"]),
+                    lattes=row.get(column_labels["lattes"]),
+                    orcid=row.get(column_labels["orcid"]),
+                    email=row.get(column_labels["email"]),
+                )
+
+    @classmethod
+    def load_row(
+        cls,
+        user,
+        journal_title=None,
+        year=None,
+        fullname=None,
+        declared_role=None,
+        role=None,
+        institution_name=None,
+        institution_div1=None,
+        institution_div2=None,
+        institution_city=None,
+        institution_state=None,
+        institution_country=None,
+        lattes=None,
+        orcid=None,
+        email=None,
+        gender_code=None,
+        gender_identification_status=None,
+    ):
+
+        locations = []
+        for loc in Location.standardize(
+            institution_city,
+            institution_state,
+            institution_country,
+            user=user,
+        ):
+            locations.append(loc["location"])
+
+        researcher = None
+        for affiliation in Affiliation.create_or_update_with_declared_name(
+            user,
+            declared_name=institution_name,
+            level_1=institution_div1,
+            level_2=None,
+            level_3=None,
+            locations=locations,
+            url=None,
+        ):
+
+            researcher = Researcher.create_or_update(
+                user,
+                given_names=None,
+                last_name=None,
+                suffix=None,
+                declared_name=fullname,
+                affiliation=affiliation,
+                year=year,
+                orcid=orcid,
+                lattes=lattes,
+                other_ids=None,
+                email=email,
+                gender=None,
+                gender_identification_status=None,
+            )
+
+        if researcher is None:
+            researcher = Researcher.create_or_update(
+                user,
+                given_names=None,
+                last_name=None,
+                suffix=None,
+                declared_name=fullname,
+                affiliation=None,
+                year=year,
+                orcid=orcid,
+                lattes=lattes,
+                other_ids=None,
+                email=email,
+                gender=None,
+                gender_identification_status=None,
+            )
+        try:
+            journal_title = journal_title and journal_title.strip()
+            journal = Journal.objects.get(
+                Q(title__icontains=journal_title) |
+                Q(official__title__icontains=journal_title)
+            )
+            logging.info(f"EditorialBoard {journal_title} OK")
+        except Journal.DoesNotExist as e:
+            logging.info(f"EditorialBoard {journal_title} {e}")
+            editorial_board = None
+        else:
+            editorial_board = EditorialBoard.get_or_create(
+                journal,
+                initial_year=year,
+                final_year=year,
+                user=user,
+            )
+            if researcher and editorial_board:
+                EditorialBoardMember.create_or_update(
+                    user,
+                    editorial_board,
+                    researcher,
+                    initial_month=None,
+                    final_month=None,
+                    declared_role=declared_role,
+                    role=None,
+                )
 
 
 class EditorialBoardMemberFile(models.Model):

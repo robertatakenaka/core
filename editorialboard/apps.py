@@ -1,6 +1,6 @@
 from django.apps import AppConfig
 
 
-class ResearcherConfig(AppConfig):
+class EditorialBoardConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
-    name = "researcher"
+    name = "editorialboard"

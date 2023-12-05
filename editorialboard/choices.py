@@ -2,13 +2,17 @@ from django.utils.translation import gettext_lazy as _
 
 GENDER_IDENTIFICATION_STATUS = [
     ("DECLARED", _("Declarado por el investigador")),
-    ("AUTOMATIC", _("Identificado automáticamente por programa de computador")),
+    ("AUTOMATIC", _("Identificado automaticamente por programa de computador")),
     ("MANUAL", _("Identificado por algun usuario")),
 ]
 
+EDITOR_IN_CHIEF = "in-chief"
+EXECUTIVE_EDITOR = "executive"
+ASSOCIATE_EDITOR = "associate"
+TECHNICAL_TEAM = "technical"
 ROLE = [
-    ("Editor-Chefe", _("Editor-Chefe")),
-    ("Editor(es) Executivo", _("Editor(es) Executivo")),
-    ("Editor(es) Associados ou de Seção", _("Editor(es) Associados ou de Seção")),
-    ("Equipe Técnica", _("Equipe Técnica")),
+    (EDITOR_IN_CHIEF, _("Editor-in-chief")),
+    (EXECUTIVE_EDITOR, _("Editor")),
+    (ASSOCIATE_EDITOR, _("Associate editor")),
+    (TECHNICAL_TEAM, _("Technical team")),
 ]

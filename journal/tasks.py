@@ -5,7 +5,10 @@ from django.contrib.auth import get_user_model
 from collection.models import Collection
 from config import celery_app
 from journal.sources import classic_website
-from journal.sources.article_meta import process_journal_article_meta, _register_journal_data
+from journal.sources.article_meta import (
+    process_journal_article_meta,
+    _register_journal_data,
+)
 from tracker.models import UnexpectedEvent
 
 
@@ -47,7 +50,7 @@ def load_journal_from_article_meta(
                     username=username,
                     collection_acron=item.acron3,
                     limit=limit,
-                    load_data=load_data
+                    load_data=load_data,
                 )
             )
     except Exception as e:
@@ -63,7 +66,12 @@ def load_journal_from_article_meta(
 
 @celery_app.task(bind=True)
 def load_journal_from_article_meta_for_one_collection(
-    self, username=None, user_id=None, collection_acron=None, limit=None, load_data=None,
+    self,
+    username=None,
+    user_id=None,
+    collection_acron=None,
+    limit=None,
+    load_data=None,
 ):
     user = _get_user(self.request, username=username, user_id=user_id)
     try:

@@ -1,29 +1,37 @@
 [Periódico]
-data_required=False
+data_required=True
 type=String
 
 [Data]
-data_required=False
+data_required=True
 type=integer
 
-[Suffix]
-data_required=False
-type=String
-
 [Nome do membro]
-data_required=False
-type=String
-
-[Sobrenome]
-data_required=False
+data_required=True
 type=String
 
 [Cargo / instância do membro]
-data_required=False
-type=(Editor-Chefe|Editor(es) Executivo|Editor(es) Associados ou de Seção|Equipe Técnica)
+data_required=True
+type=String
 
-[Institution]
+[Instituição]
+data_required=True
+type=String
+
+[Departamento]
 data_required=False
+type=String
+
+[Cidade]
+data_required=True
+type=String
+
+[Estado]
+data_required=True
+type=String
+
+[País]
+data_required=True
 type=String
 
 [CV Lattes]
@@ -31,17 +39,9 @@ data_required=False
 type=String
 
 [ORCID iD]
-data_required=False
+data_required=True
 type=String
 
 [Email]
-data_required=False
-type=String
-
-[Gender]
-data_required=False
-type=String
-
-[Gender status]
-data_required=False
+data_required=True
 type=String

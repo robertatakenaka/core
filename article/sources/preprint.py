@@ -39,8 +39,10 @@ def harvest_preprints(URL, user):
                 get_or_create_titles(titles=article_info.get("title"), user=user)
             )
             article.researchers.set(
-                get_or_create_researches(
+                get_or_create_researchers(
                     authors=article_info.get("authors"),
+                    user=user,
+                    year=article_info.get("date", {}).get("year"),
                 )
             )
             article.keywords.set(
@@ -209,28 +211,38 @@ def get_doi(identifier):
 
 
 def get_publisher(publisher):
-    try:
-        return models.Institution.objects.get(name=publisher[0]["text"])
-    except (models.Institution.DoesNotExist, IndexError):
-        return None
+    return models.Institution.create_or_update(
+        user,
+        name=publisher[0]["text"],
+        acronym=None,
+        level_1=None,
+        level_2=None,
+        level_3=None,
+        location=None,
+        url=None,
+    )
 
 
 def set_dates(article, date):
     article.set_date_pub(date)
 
 
-def get_or_create_researches(authors):
+def get_or_create_researchers(authors, user, year):
     data = []
     for author in authors:
-        obj = models.Researcher.get_or_create(
+        obj = models.Researcher.create_or_update(
+            user,
             given_names=author.get("given_names"),
             last_name=author.get("surname"),
-            declared_name=author.get("declared_name"),
-            email=None,
-            institution_name=None,
             suffix=None,
+            declared_name=author.get("declared_name"),
+            affiliation=None,
+            year=year,
             orcid=None,
             lattes=None,
+            other_ids=None,
+            gender=None,
+            gender_identification_status=None,
         )
         data.append(obj)
     return data

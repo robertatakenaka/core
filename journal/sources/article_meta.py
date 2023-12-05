@@ -1,3 +1,4 @@
+import logging
 import sys
 
 from core.utils.rename_dictionary_keys import rename_dictionary_keys
@@ -56,7 +57,10 @@ def _register_journal_data(user, collection_acron3):
     journals = AMJournal.objects.filter(collection__acron3=collection_acron3)
     for journal_am in journals:
         try:
+            logging.info(f"issn: {journal_am.scielo_issn}")
             journal_dict = rename_dictionary_keys(journal_am.data, correspondencia_journal)
+            # logging.info(journal_am.data)
+            # logging.info(journal_dict)
             official_journal = am_to_core.create_or_update_official_journal(
                 title=journal_dict.get("publication_title"),
                 new_title=journal_dict.get("new_title"),

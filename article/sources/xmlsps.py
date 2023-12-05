@@ -21,6 +21,8 @@ from packtools.sps.pid_provider.xml_sps_lib import XMLWithPre
 
 from article import models
 from issue.models import TocSection
+from location.models import Location
+from researcher.models import Researcher, Affiliation
 from tracker.models import UnexpectedEvent
 
 
@@ -190,22 +192,99 @@ def create_or_create_abstract(xmltree, user):
 
 
 def create_or_update_researchers(xmltree, user):
-    authors = Authors(xmltree=xmltree).contribs
+    authors = Authors(xmltree=xmltree).contribs_with_affs
+    """
+    {
+        "id": affiliation_id or None,
+        "label": label or None,
+        "orgname": orgname or None,
+        "orgdiv1": orgdiv1 or None,
+        "orgdiv2": orgdiv2 or None,
+        "original": original or None,
+        "city": city or None,
+        "state": state or None,
+        "country_name": country_name or None,
+        "country_code": country_code or None,
+        "email": email or None,
+    }
+    """
     # Falta gender e gender_identification_status
     data = []
+
+    try:
+        year = ArticleDates(xmltree=xmltree).collection_date.get("year")
+    except Exception as e:
+        year = None
+    try:
+        article_lang = ArticleAndSubArticles(xmltree=xmltree).main_lang
+    except Exception as e:
+        article_lang = None
+
+    affs = {}
+    locs = {}
     for author in authors:
-        obj = models.Researcher.create_or_update(
-            given_names=author.get("given_names"),
-            last_name=author.get("surname"),
-            declared_name=None,
-            email=None,
-            orcid=author.get("orcid"),
-            suffix=author.get("suffix"),
-            lattes=author.get("lattes"),
-            institution_name=None,
-            user=user,
-        )
-        data.append(obj)
+        email = author.get("email")
+
+        # affiliations do autor
+        for aff in author.get("affs") or []:
+            email = email or aff.get("email")
+
+            k = (
+                aff.get("orgname"),
+                aff.get("orgdiv1"),
+                aff.get("orgdiv2"),
+                aff.get("city"),
+                aff.get("state"),
+                aff.get("country_code"),
+                aff.get("country_name"),
+            )
+            affiliation = affs.get(k)
+            if not affiliation:
+                lk = (
+                    aff.get("city"),
+                    aff.get("state"),
+                    aff.get("country_code"),
+                    aff.get("country_name"),
+                )
+                location = locs.get(lk)
+                if not location:
+                    for loc in Location.standardize(
+                        aff.get("city"),
+                        aff.get("state"),
+                        aff.get("country_code") or aff.get("country_name"),
+                        user=user,
+                    ):
+                        location = loc["location"]
+                        locs[lk] = location
+
+                affiliation = Affiliation.create_or_update(
+                    user,
+                    name=aff.get("orgname"),
+                    acronym=None,
+                    level_1=aff.get("orgdiv1"),
+                    level_2=aff.get("orgdiv2"),
+                    level_3=None,
+                    location=location,
+                    url=None,
+                )
+                affs[k] = affiliation
+
+            obj = Researcher.create_or_update(
+                user,
+                given_names=author.get("given_names"),
+                last_name=author.get("surname"),
+                suffix=author.get("suffix"),
+                declared_name=author.get("declared_name"),
+                affiliation=affiliation,
+                year=year,
+                orcid=author.get("orcid"),
+                lattes=author.get("lattes"),
+                other_ids=author.get("other_ids"),
+                email=email,
+                gender=author.get("gender"),
+                gender_identification_status=author.get("gender_identification_status"),
+            )
+            data.append(obj)
     return data
 
 

@@ -3,6 +3,7 @@ import os
 
 from django.contrib.auth import get_user_model
 from django.db import models
+from django.db.models import Q
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 from modelcluster.fields import ParentalKey
@@ -24,6 +25,7 @@ from core.models import (
     FileWithLang
 )
 from institution.models import (
+    BaseHistoryItem,
     CopyrightHolderHistoryItem,
     OwnerHistoryItem,
     PublisherHistoryItem,
@@ -181,7 +183,7 @@ class OfficialJournal(CommonControlField):
         return f"{self.issn_electronic} {self.issn_print} {self.title}"
 
     def __str__(self):
-        return f"{self.issn_electronic} {self.issn_print} {self.title}"
+        return f"{self.title} {self.issn_electronic} {self.issn_print}"
 
     @property
     def data(self):
@@ -296,7 +298,7 @@ class Journal(CommonControlField, ClusterableModel):
     )
     title = models.TextField(_("Journal Title"), null=True, blank=True)
     short_title = models.TextField(_("Short Title"), null=True, blank=True)
-    other_titles = models.ManyToManyField(JournalTitle, verbose_name=_("Other titles"))
+    other_titles = models.ManyToManyField(JournalTitle)
     logo = models.ForeignKey(
         "wagtailimages.Image",
         on_delete=models.SET_NULL,
@@ -353,28 +355,28 @@ class Journal(CommonControlField, ClusterableModel):
     )
     subject_descriptor = models.ManyToManyField(
         "SubjectDescriptor",
-        verbose_name=_("Subject Descriptors"),
+        # verbose_name=_("Subject Descriptors"),
     )
     subject = models.ManyToManyField(
         "Subject",
-        verbose_name=_("Study Areas"),
+        # verbose_name=_("Study Areas"),
     )
     wos_db = models.ManyToManyField(
         "WebOfKnowledge",
-        verbose_name=_("Web of Knowledge Databases"),
+        # verbose_name=_("Web of Knowledge Databases"),
     )
     wos_area = models.ManyToManyField(
         "WebOfKnowledgeSubjectCategory",
-        verbose_name=_("Web of Knowledge Subject Categories"),
+        # verbose_name=_("Web of Knowledge Subject Categories"),
     )
     text_language = models.ManyToManyField(
         Language,
-        verbose_name=_("Text Languages"),
+        # verbose_name=_("Text Languages"),
         related_name="text_language",
     )
     abstract_language = models.ManyToManyField(
         Language,
-        verbose_name=_("Abstract Languages"),
+        # verbose_name=_("Abstract Languages"),
         related_name="abstract_language",
     )
     standard = models.ForeignKey(
@@ -819,18 +821,22 @@ class OwnerHistory(Orderable, OwnerHistoryItem):
     journal = ParentalKey(
         Journal, on_delete=models.SET_NULL, related_name="owner_history", null=True
     )
+    
+    panels = BaseHistoryItem.panels
 
 
 class PublisherHistory(Orderable, PublisherHistoryItem):
     journal = ParentalKey(
         Journal, on_delete=models.SET_NULL, related_name="publisher_history", null=True
     )
+    panels = BaseHistoryItem.panels
 
 
 class SponsorHistory(Orderable, SponsorHistoryItem):
     journal = ParentalKey(
         Journal, on_delete=models.SET_NULL, null=True, related_name="sponsor_history"
     )
+    panels = BaseHistoryItem.panels
 
 
 class CopyrightHolderHistory(Orderable, CopyrightHolderHistoryItem):
@@ -840,6 +846,7 @@ class CopyrightHolderHistory(Orderable, CopyrightHolderHistoryItem):
         null=True,
         related_name="copyright_holder_history",
     )
+    panels = BaseHistoryItem.panels
 
 
 class JournalSocialNetwork(Orderable, SocialNetwork):
@@ -1652,5 +1659,4 @@ class AMJournal(CommonControlField):
         obj.scielo_issn = scielo_issn or obj.scielo_issn
         obj.data = data or obj.data
         obj.save()
-
         return obj
