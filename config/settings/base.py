@@ -124,7 +124,6 @@ LOCAL_APPS = [
     "collection",
     "core",
     "editorialboard",
-    "files_storage",
     "institution",
     "issue",
     "journal",
