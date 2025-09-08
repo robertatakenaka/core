@@ -34,11 +34,11 @@ User = get_user_model()
 # - load_preprint: Coleta e carrega preprints de servidor OAI-PMH
 # - task_get_opac_xmls: Obtém XMLs de artigos do OPAC via API
 # - task_load_article_from_article_source: Processa XMLs de ArticleSource
-# - task_load_articles: Carrega artigos de PidProviderXML
+# - task_load_article_from_pid_provider: Carrega artigos de PidProviderXML
 #
 # TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
 # - load_funding_data: Carrega dados de financiamento da pesquisa
-# - task_articles_complete_data: Dispara complementação em lote
+# - task_complete_articles_data: Dispara complementação em lote
 # - article_complete_data: Completa dados de um artigo específico
 # - transfer_license_statements_fk_to_article_license: Migra dados de licença
 # - normalize_stored_email: Normaliza emails em ResearcherIdentifier
@@ -62,7 +62,7 @@ User = get_user_model()
 # - load_preprint: Coleta e carrega preprints de servidor OAI-PMH
 # - task_get_opac_xmls: Obtém XMLs de artigos do OPAC via API
 # - task_load_article_from_article_source: Processa XMLs de ArticleSource
-# - task_load_articles: Carrega artigos de PidProviderXML
+# - task_load_article_from_pid_provider: Carrega artigos de PidProviderXML
 # ==============================================================================
 @celery_app.task(bind=True, name=_("load_preprints"))
 def load_preprint(self, user_id, oai_pmh_preprint_uri):
@@ -269,16 +269,23 @@ def task_load_article_from_article_source(
         )
 
 
-@celery_app.task(bind=True, name="task_load_articles")
-def task_load_articles(
+@celery_app.task(bind=True, name="task_load_article_from_pid_provider")
+def task_load_article_from_pid_provider(
     self,
     user_id=None,
     username=None,
+    collection_list=None,
+    issn_list=None,
+    from_pub_year=None,
+    until_pub_year=None,
+    from_processing_date=None,
+    until_processing_date=None,
+    proc_status_list=None,
 ):
     """
     Tarefa para carregar artigos a partir de arquivos XML do PidProvider.
     Processa todos os objetos PidProviderXML com status TODO, delegando
-    o processamento individual para task_load_article_from_ppxml.
+    o processamento individual para task_load_article_from_pp_xml.
 
     Args:
         self: Instância da tarefa Celery
@@ -289,7 +296,7 @@ def task_load_articles(
         None
 
     Side Effects:
-        - Dispara tarefas task_load_article_from_ppxml para cada PidProviderXML
+        - Dispara tarefas task_load_article_from_pp_xml para cada PidProviderXML
         - Dispara tarefa de marcação de artigos deletados após conclusão
         - Registra UnexpectedEvent em caso de erro
     """
@@ -297,13 +304,19 @@ def task_load_articles(
         user = get_user(self.request, username, user_id)
 
         # Busca todos os PidProviderXML com status TODO
-        pp_xml_items = PidProviderXML.objects.filter(
-            proc_status=PPXML_STATUS_TODO
-        ).values_list("id", flat=True)
+        pp_xml_items = controller.get_pp_xml_ids_to_load_articles(
+            collection_list=collection_list,
+            issn_list=issn_list,
+            from_pub_year=from_pub_year,
+            until_pub_year=until_pub_year,
+            from_processing_date=from_processing_date,
+            until_processing_date=until_processing_date,
+            proc_status_list=proc_status_list,
+        )
 
         # Cria um grupo de tarefas para processar em paralelo
         job = group(
-            task_load_article_from_ppxml.s(
+            task_load_article_from_pp_xml.s(
                 pp_xml_id=pp_xml_id,
                 user_id=user_id or user.id,
                 username=username or user.username,
@@ -315,27 +328,19 @@ def task_load_articles(
         result = job.apply_async()
         result.get()  # Aguarda todas as tarefas terminarem
 
-        # Após processar todos os artigos, marca os deletados
-        task_mark_articles_as_deleted_without_pp_xml.apply_async(
-            kwargs=dict(
-                user_id=user_id or user.id,
-                username=username or user.username,
-            )
-        )
-
     except Exception as exception:
         exc_type, exc_value, exc_traceback = sys.exc_info()
         UnexpectedEvent.create(
             exception=exception,
             exc_traceback=exc_traceback,
             detail={
-                "task": "article.tasks.load_articles",
+                "task": "article.tasks.task_load_article_from_pid_provider",
             },
         )
 
 
-@celery_app.task(bind=True, name="task_load_article_from_ppxml")
-def task_load_article_from_ppxml(
+@celery_app.task(bind=True, name="task_load_article_from_pp_xml")
+def task_load_article_from_pp_xml(
     self,
     pp_xml_id,
     user_id=None,
@@ -370,72 +375,22 @@ def task_load_article_from_ppxml(
         user = get_user(self.request, username, user_id)
 
         # Busca o PidProviderXML específico
-        try:
-            pp_xml = PidProviderXML.objects.select_related("current_version").get(
-                id=pp_xml_id
-            )
-        except PidProviderXML.DoesNotExist:
-            return {
-                "success": False,
-                "pp_xml_id": pp_xml_id,
-                "error": f"PidProviderXML with id {pp_xml_id} not found",
-            }
+        pp_xml = PidProviderXML.objects.select_related("current_version").get(
+            id=pp_xml_id
+        )
 
-        # Verifica se ainda está com status TODO (pode ter sido processado por outra tarefa)
-        if pp_xml.proc_status != PPXML_STATUS_TODO:
-            return {
-                "success": True,
-                "pp_xml_id": pp_xml_id,
-                "error": f"PidProviderXML already processed (status: {pp_xml.proc_status})",
-            }
+        # Carrega o artigo do arquivo XML
+        article = load_article(
+            user,
+            file_path=pp_xml.current_version.file.path,
+            v3=pp_xml.v3,
+            pp_xml=pp_xml,
+        )
 
-        try:
-            # Carrega o artigo do arquivo XML
-            article = load_article(
-                user,
-                file_path=pp_xml.current_version.file.path,
-                v3=pp_xml.v3,
-                pp_xml=pp_xml,
-            )
-
-            if article and article.valid:
-                # Marca como processado com sucesso
-                pp_xml.proc_status = PPXML_STATUS_DONE
-                pp_xml.save()
-
-                return {
-                    "success": True,
-                    "pp_xml_id": pp_xml_id,
-                    "article_id": article.id if article else None,
-                }
-            else:
-                # Artigo inválido
-                error_msg = "Article is invalid or could not be loaded"
-                UnexpectedEvent.create(
-                    exception=Exception(error_msg),
-                    exc_traceback=None,
-                    detail={
-                        "task": "article.tasks.task_load_article_from_ppxml",
-                        "pp_xml_id": pp_xml_id,
-                        "pp_xml": str(pp_xml),
-                        "article_valid": article.valid if article else False,
-                    },
-                )
-                return {"success": False, "pp_xml_id": pp_xml_id, "error": error_msg}
-
-        except Exception as exception:
-            # Erro ao processar o arquivo
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            UnexpectedEvent.create(
-                exception=exception,
-                exc_traceback=exc_traceback,
-                detail={
-                    "task": "article.tasks.task_load_article_from_ppxml",
-                    "pp_xml_id": pp_xml_id,
-                    "pp_xml": str(pp_xml),
-                },
-            )
-            return {"success": False, "pp_xml_id": pp_xml_id, "error": str(exception)}
+        if article and article.valid:
+            # Marca como processado com sucesso
+            pp_xml.proc_status = PPXML_STATUS_DONE
+            pp_xml.save()
 
     except Exception as exception:
         # Erro geral na tarefa
@@ -444,17 +399,16 @@ def task_load_article_from_ppxml(
             exception=exception,
             exc_traceback=exc_traceback,
             detail={
-                "task": "article.tasks.task_load_article_from_ppxml",
+                "task": "article.tasks.task_load_article_from_pp_xml",
                 "pp_xml_id": pp_xml_id,
             },
         )
-        return {"success": False, "pp_xml_id": pp_xml_id, "error": str(exception)}
 
 
 # ==============================================================================
 # TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
 # - load_funding_data: Carrega dados de financiamento da pesquisa
-# - task_articles_complete_data: Dispara complementação em lote
+# - task_complete_articles_data: Dispara complementação em lote
 # - article_complete_data: Completa dados de um artigo específico
 # - transfer_license_statements_fk_to_article_license: Migra dados de licença
 # - normalize_stored_email: Normaliza emails em ResearcherIdentifier
@@ -479,7 +433,7 @@ def load_funding_data(user, file_path):
 
 
 @celery_app.task(bind=True)
-def task_articles_complete_data(
+def task_complete_articles_data(
     self, user_id=None, username=None, from_date=None, force_update=False
 ):
     """
@@ -499,7 +453,7 @@ def task_articles_complete_data(
         None
 
     Side Effects:
-        - Dispara múltiplas tarefas assíncronas article_complete_data
+        - Dispara múltiplas tarefas assíncronas task_complete_article_data
         - Registra UnexpectedEvent em caso de erro
     """
     try:
@@ -507,7 +461,7 @@ def task_articles_complete_data(
 
         for item in Article.objects.iterator():
             try:
-                article_complete_data.apply_async(
+                task_complete_article_data.apply_async(
                     kwargs={
                         "user_id": user.id,
                         "username": user.username,
@@ -520,7 +474,7 @@ def task_articles_complete_data(
                     exception=exception,
                     exc_traceback=exc_traceback,
                     detail={
-                        "task": "article.tasks.task_articles_complete_data",
+                        "task": "article.tasks.task_complete_articles_data",
                         "item": str(item),
                     },
                 )
@@ -530,13 +484,13 @@ def task_articles_complete_data(
             exception=exception,
             exc_traceback=exc_traceback,
             detail={
-                "task": "article.tasks.task_articles_complete_data",
+                "task": "article.tasks.task_complete_articles_data",
             },
         )
 
 
 @celery_app.task(bind=True)
-def article_complete_data(
+def task_complete_article_data(
     self, user_id=None, username=None, item_id=None, force_update=None
 ):
     """
