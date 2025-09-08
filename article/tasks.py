@@ -27,14 +27,15 @@ User = get_user_model()
 
 
 # ==============================================================================
-# TAREFAS DE CARREGAMENTO E IMPORTAÇÃO / LOADING AND IMPORT TASKS
+# TAREFAS DE IMPORTAÇÃO E CARREGAMENTO / IMPORT AND LOADING TASKS
+# TAREFAS DE CARREGAMENTO / LOADING TASKS
+# TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
+# TAREFAS DE LIMPEZA E MANUTENÇÃO / CLEANUP AND MAINTENANCE TASKS
+# TAREFAS DE CONVERSÃO E FORMATAÇÃO / CONVERSION AND FORMATTING TASKS
+# TAREFAS DE EXPORTAÇÃO / EXPORT TASKS
 # ==============================================================================
 
 
-
-# ==============================================================================
-# TAREFAS DE COMPLETAÇÃO DOS DADOS
-# ==============================================================================
 
 
 # ==============================================================================
