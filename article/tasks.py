@@ -13,7 +13,6 @@ from article.sources.preprint import harvest_preprints
 from article.sources.xmlsps import load_article
 from collection.models import Collection
 from config import celery_app
-from core.utils.extracts_normalized_email import extracts_normalized_email
 from core.utils.utils import fetch_data, _get_user
 from journal.models import SciELOJournal
 from pid_provider.choices import PPXML_STATUS_DONE, PPXML_STATUS_TODO
@@ -37,15 +36,13 @@ User = get_user_model()
 # - task_load_article_from_pid_provider: Carrega artigos de PidProviderXML
 #
 # TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
-# - load_funding_data: Carrega dados de financiamento da pesquisa
 # - task_complete_articles_data: Dispara complementação em lote
-# - article_complete_data: Completa dados de um artigo específico
-# - transfer_license_statements_fk_to_article_license: Migra dados de licença
-# - normalize_stored_email: Normaliza emails em ResearcherIdentifier
+# - task_complete_article_data: Completa dados de um artigo específico
+# - task_normalize_stored_email: Normaliza emails em ResearcherIdentifier
 #
 # TAREFAS DE LIMPEZA E MANUTENÇÃO / CLEANUP AND MAINTENANCE TASKS
 # - task_mark_articles_as_deleted_without_pp_xml: Marca artigos órfãos como deletados
-# - remove_duplicate_articles_task: Remove artigos duplicados
+# - task_remove_duplicate_articles: Remove artigos duplicados
 #
 # TAREFAS DE CONVERSÃO E FORMATAÇÃO / CONVERSION AND FORMATTING TASKS
 # - task_convert_xml_to_other_formats_for_articles: Dispara conversão em lote
@@ -275,7 +272,7 @@ def task_load_article_from_pid_provider(
     user_id=None,
     username=None,
     collection_list=None,
-    issn_list=None,
+    journal_acron_list=None,
     from_pub_year=None,
     until_pub_year=None,
     from_processing_date=None,
@@ -306,7 +303,7 @@ def task_load_article_from_pid_provider(
         # Busca todos os PidProviderXML com status TODO
         pp_xml_items = controller.get_pp_xml_ids_to_load_articles(
             collection_list=collection_list,
-            issn_list=issn_list,
+            journal_acron_list=journal_acron_list,
             from_pub_year=from_pub_year,
             until_pub_year=until_pub_year,
             from_processing_date=from_processing_date,
@@ -407,34 +404,20 @@ def task_load_article_from_pp_xml(
 
 # ==============================================================================
 # TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
-# - load_funding_data: Carrega dados de financiamento da pesquisa
 # - task_complete_articles_data: Dispara complementação em lote
-# - article_complete_data: Completa dados de um artigo específico
-# - transfer_license_statements_fk_to_article_license: Migra dados de licença
-# - normalize_stored_email: Normaliza emails em ResearcherIdentifier
+# - task_complete_article_data: Completa dados de um artigo específico
+# - task_normalize_stored_email: Normaliza emails em ResearcherIdentifier
 # ==============================================================================
-@celery_app.task()
-def load_funding_data(user, file_path):
-    """
-    Carrega dados de financiamento a partir de um arquivo.
-
-    Args:
-        user: ID do usuário que está executando a operação
-        file_path (str): Caminho para o arquivo contendo dados de financiamento
-
-    Returns:
-        None
-
-    Raises:
-        User.DoesNotExist: Se o usuário não for encontrado
-    """
-    user = User.objects.get(pk=user)
-    controller.read_file(user, file_path)
-
-
 @celery_app.task(bind=True)
 def task_complete_articles_data(
-    self, user_id=None, username=None, from_date=None, force_update=False
+    self, 
+    user_id=None,
+    username=None,
+    collection_list=None,
+    journal_acron_list=None,
+    from_pub_year=None,
+    until_pub_year=None,
+    force_update=None,
 ):
     """
     Dispara complementação de dados para todos os artigos.
@@ -458,14 +441,17 @@ def task_complete_articles_data(
     """
     try:
         user = _get_user(self.request, username, user_id)
-
-        for item in Article.objects.iterator():
+        journal_ids = None
+        if collection_list or journal_acron_list:
+            journal_ids = SciELOJournal.get_journal_ids(collection_list, journal_acron_list)
+        for item in Article.get_items_to_complete_data(journal_ids, from_pub_year, until_pub_year):
             try:
                 task_complete_article_data.apply_async(
                     kwargs={
                         "user_id": user.id,
                         "username": user.username,
                         "item_id": item.id,
+                        "force_update": force_update,
                     }
                 )
             except Exception as exception:
@@ -514,62 +500,25 @@ def task_complete_article_data(
     user = _get_user(self.request, username, user_id)
     try:
         item = Article.objects.get(pk=item_id)
-        if item.pid_v3 and not item.sps_pkg_name:
-            item.sps_pkg_name = PidProvider.get_sps_pkg_name(item.pid_v3)
-            item.save()
-    except Article.DoesNotExist:
-        pass
-
-
-@celery_app.task(bind=True)
-def transfer_license_statements_fk_to_article_license(
-    self, user_id=None, username=None
-):
-    """
-    Migra dados de licença do modelo antigo para o campo article_license.
-
-    Transfere informações de license_statements ou license para o novo
-    campo unificado article_license.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-
-    Returns:
-        None
-
-    Side Effects:
-        - Atualiza campo article_license de múltiplos artigos
-        - Registra atualização no log quando houver mudanças
-    """
-    user = _get_user(self.request, username, user_id)
-    articles_to_update = []
-    for instance in Article.objects.filter(article_license__isnull=True):
-
-        new_license = None
-        if (
-            instance.license_statements.exists()
-            and instance.license_statements.first().url
-        ):
-            new_license = instance.license_statements.first().url
-        elif instance.license and instance.license.license_type:
-            new_license = instance.license.license_type
-
-        if new_license:
-            instance.article_license = new_license
-            instance.updated_by = user
-            articles_to_update.append(instance)
-
-    if articles_to_update:
-        Article.objects.bulk_update(
-            articles_to_update, ["article_license", "updated_by"]
+        try:
+            pp_xml = PidProviderXML.objects.get(item.pid_v3)
+        except PidProviderXML.DoesNotExist:
+            pp_xml = None
+        else:
+            item.complete_data(pp_xml)
+    except Exception as exception:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=exception,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.task_complete_article_data",
+            },
         )
-        logging.info("The article_license of model Articles have been updated")
 
 
 @celery_app.task(bind=True)
-def normalize_stored_email(self):
+def task_normalize_stored_email(self):
     """
     Normaliza emails armazenados em ResearcherIdentifier.
 
@@ -586,22 +535,13 @@ def normalize_stored_email(self):
         - Atualiza campo identifier de múltiplos ResearcherIdentifier
         - Realiza bulk_update para otimizar performance
     """
-    updated_list = []
-    re_identifiers = ResearcherIdentifier.get_items_with_invalid_email()
-
-    for re_identifier in re_identifiers:
-        email = extracts_normalized_email(raw_email=re_identifier.identifier)
-        if email:
-            re_identifier.identifier = email
-            updated_list.append(re_identifier)
-
-    ResearcherIdentifier.objects.bulk_update(updated_list, ["identifier"])
+    ResearcherIdentifier.task_normalize_stored_email()
 
 
 # ==============================================================================
 # TAREFAS DE LIMPEZA E MANUTENÇÃO / CLEANUP AND MAINTENANCE TASKS
 # - task_mark_articles_as_deleted_without_pp_xml: Marca artigos órfãos como deletados
-# - remove_duplicate_articles_task: Remove artigos duplicados
+# - task_remove_duplicate_articles: Remove artigos duplicados
 # ==============================================================================
 @celery_app.task(bind=True, name="task_mark_articles_as_deleted_without_pp_xml")
 def task_mark_articles_as_deleted_without_pp_xml(self, user_id=None, username=None):
@@ -649,7 +589,7 @@ def task_mark_articles_as_deleted_without_pp_xml(self, user_id=None, username=No
 
 
 @celery_app.task(bind=True)
-def remove_duplicate_articles_task(self, user_id=None, username=None, pid_v3=None):
+def task_remove_duplicate_articles(self, user_id=None, username=None, pid_v3=None):
     """
     Tarefa Celery para remover artigos duplicados.
 
