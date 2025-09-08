@@ -27,12 +27,30 @@ User = get_user_model()
 
 @celery_app.task()
 def load_funding_data(user, file_path):
-    user = User.objects.get(pk=user)
+    """
+    Carrega dados de financiamento a partir de um arquivo.
 
+    Args:
+        user: ID do usuário que está executando a operação
+        file_path (str): Caminho para o arquivo contendo dados de financiamento
+
+    Returns:
+        None
+
+    Raises:
+        User.DoesNotExist: Se o usuário não for encontrado
+    """
+    user = User.objects.get(pk=user)
     controller.read_file(user, file_path)
 
 
 def _items_to_load_article():
+    """
+    Retorna um iterador de objetos PidProviderXML pendentes de processamento.
+
+    Returns:
+        QuerySet iterator: Iterador de objetos PidProviderXML com status TODO
+    """
     return (
         PidProviderXML.objects.select_related("current_version")
         .filter(proc_status=PPXML_STATUS_TODO)
@@ -41,7 +59,13 @@ def _items_to_load_article():
 
 
 def items_to_load_article_with_valid_false():
-    # Obtém os objetos PidProviderXMl onde o campo pid_v3 de article e v3 possuem o mesmo valor
+    """
+    Retorna objetos PidProviderXML correspondentes a artigos marcados como inválidos.
+
+    Returns:
+        QuerySet iterator: Iterador de objetos PidProviderXML onde o campo pid_v3 
+                          corresponde a artigos com valid=False
+    """
     articles = Article.objects.filter(valid=False).values("pid_v3")
     return PidProviderXML.objects.filter(v3__in=Subquery(articles)).iterator()
 
@@ -52,6 +76,27 @@ def task_load_articles(
     user_id=None,
     username=None,
 ):
+    """
+    Tarefa para carregar artigos a partir de arquivos XML do PidProvider.
+
+    Processa todos os objetos PidProviderXML com status TODO, carregando
+    os artigos correspondentes e marcando como DONE quando processados
+    com sucesso.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        None
+
+    Side Effects:
+        - Cria/atualiza artigos no banco de dados
+        - Atualiza status de PidProviderXML para DONE quando bem-sucedido
+        - Registra UnexpectedEvent em caso de erro
+        - Dispara tarefa de marcação de artigos deletados após conclusão
+    """
     try:
         user = _get_user(self.request, username, user_id)
 
@@ -103,11 +148,23 @@ def task_load_articles(
 @celery_app.task(bind=True, name="task_mark_articles_as_deleted_without_pp_xml")
 def task_mark_articles_as_deleted_without_pp_xml(self, user_id=None, username=None):
     """
-    Tarefa Celery para marcar artigos como DATA_STATUS_DELETED quando pp_xml é None.
+    Marca artigos como deletados quando não possuem referência PidProviderXML.
+
+    Esta tarefa identifica artigos órfãos (sem pp_xml associado) e os marca
+    com status DATA_STATUS_DELETED.
 
     Args:
-        user_id: ID do usuário (opcional)
-        username: Nome do usuário (opcional)
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        None
+
+    Side Effects:
+        - Atualiza status de artigos sem pp_xml para DATA_STATUS_DELETED
+        - Registra quantidade de artigos atualizados no log
+        - Registra UnexpectedEvent em caso de erro
     """
     try:
         user = _get_user(self.request, username, user_id)
@@ -135,6 +192,20 @@ def task_mark_articles_as_deleted_without_pp_xml(self, user_id=None, username=No
 
 @celery_app.task(bind=True, name=_("load_preprints"))
 def load_preprint(self, user_id, oai_pmh_preprint_uri):
+    """
+    Coleta e carrega preprints de um servidor OAI-PMH.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int): ID do usuário executando a tarefa
+        oai_pmh_preprint_uri (str): URI do servidor OAI-PMH de preprints
+
+    Returns:
+        None
+
+    Raises:
+        User.DoesNotExist: Se o usuário não for encontrado
+    """
     user = User.objects.get(pk=user_id)
     ## fazer filtro para não coletar tudo sempre
     harvest_preprints(oai_pmh_preprint_uri, user)
@@ -144,6 +215,26 @@ def load_preprint(self, user_id, oai_pmh_preprint_uri):
 def task_convert_xml_to_other_formats_for_articles(
     self, user_id=None, username=None, from_date=None, force_update=False
 ):
+    """
+    Dispara conversão de XML para outros formatos para todos os artigos.
+
+    Processa todos os artigos com sps_pkg_name definido, disparando
+    tarefas assíncronas individuais para conversão de formato.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+        from_date (str, optional): Data inicial para filtrar artigos (não utilizado)
+        force_update (bool): Se True, força atualização mesmo se já convertido
+
+    Returns:
+        None
+
+    Side Effects:
+        - Dispara múltiplas tarefas assíncronas convert_xml_to_other_formats
+        - Registra UnexpectedEvent em caso de erro
+    """
     try:
         user = _get_user(self.request, username, user_id)
 
@@ -183,6 +274,25 @@ def task_convert_xml_to_other_formats_for_articles(
 def convert_xml_to_other_formats(
     self, user_id=None, username=None, item_id=None, force_update=None
 ):
+    """
+    Converte XML de um artigo específico para outros formatos.
+
+    Gera formatos alternativos (PDF, HTML, etc.) a partir do XML do artigo.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+        item_id (int): ID do artigo a ser convertido
+        force_update (bool, optional): Se True, força reconversão mesmo se já existe
+
+    Returns:
+        None
+
+    Side Effects:
+        - Cria/atualiza registros ArticleFormat
+        - Registra progresso no log
+    """
     user = _get_user(self.request, username, user_id)
 
     try:
@@ -209,6 +319,26 @@ def convert_xml_to_other_formats(
 def task_articles_complete_data(
     self, user_id=None, username=None, from_date=None, force_update=False
 ):
+    """
+    Dispara complementação de dados para todos os artigos.
+
+    Processa todos os artigos, disparando tarefas assíncronas individuais
+    para completar dados faltantes.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+        from_date (str, optional): Data inicial para filtrar artigos (não utilizado)
+        force_update (bool): Se True, força atualização mesmo se dados já existem
+
+    Returns:
+        None
+
+    Side Effects:
+        - Dispara múltiplas tarefas assíncronas article_complete_data
+        - Registra UnexpectedEvent em caso de erro
+    """
     try:
         user = _get_user(self.request, username, user_id)
 
@@ -246,6 +376,24 @@ def task_articles_complete_data(
 def article_complete_data(
     self, user_id=None, username=None, item_id=None, force_update=None
 ):
+    """
+    Completa dados faltantes de um artigo específico.
+
+    Atualmente preenche o campo sps_pkg_name baseado no pid_v3.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+        item_id (int): ID do artigo a ser processado
+        force_update (bool, optional): Se True, força atualização (não utilizado)
+
+    Returns:
+        None
+
+    Side Effects:
+        - Atualiza campo sps_pkg_name do artigo se necessário
+    """
     user = _get_user(self.request, username, user_id)
     try:
         item = Article.objects.get(pk=item_id)
@@ -260,6 +408,24 @@ def article_complete_data(
 def transfer_license_statements_fk_to_article_license(
     self, user_id=None, username=None
 ):
+    """
+    Migra dados de licença do modelo antigo para o campo article_license.
+
+    Transfere informações de license_statements ou license para o novo
+    campo unificado article_license.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        None
+
+    Side Effects:
+        - Atualiza campo article_license de múltiplos artigos
+        - Registra atualização no log quando houver mudanças
+    """
     user = _get_user(self.request, username, user_id)
     articles_to_update = []
     for instance in Article.objects.filter(article_license__isnull=True):
@@ -286,6 +452,23 @@ def transfer_license_statements_fk_to_article_license(
 
 
 def remove_duplicate_articles(pid_v3=None):
+    """
+    Remove artigos duplicados baseando-se no pid_v3.
+
+    Mantém apenas o artigo mais antigo (baseado em created) quando
+    existem duplicatas com valid=False.
+
+    Args:
+        pid_v3 (str, optional): Se fornecido, remove duplicatas apenas 
+                               para este pid_v3 específico
+
+    Returns:
+        None
+
+    Side Effects:
+        - Remove artigos duplicados do banco de dados
+        - Registra UnexpectedEvent em caso de erro
+    """
     ids_to_exclude = []
     try:
         if pid_v3:
@@ -324,19 +507,55 @@ def remove_duplicate_articles(pid_v3=None):
 
 @celery_app.task(bind=True)
 def remove_duplicate_articles_task(self, user_id=None, username=None, pid_v3=None):
+    """
+    Tarefa Celery para remover artigos duplicados.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário (não utilizado)
+        username (str, optional): Nome do usuário (não utilizado)
+        pid_v3 (str, optional): PID v3 específico para remover duplicatas
+
+    Returns:
+        None
+
+    Side Effects:
+        - Chama remove_duplicate_articles() para executar a remoção
+    """
     remove_duplicate_articles(pid_v3)
 
 
 def get_researcher_identifier_unnormalized():
+    """
+    Obtém identificadores de pesquisador com emails não normalizados.
+
+    Returns:
+        QuerySet: ResearcherIdentifier com source_name="EMAIL" que não
+                 correspondem ao padrão de email válido
+    """
     return ResearcherIdentifier.objects.filter(source_name="EMAIL").exclude(
         identifier__regex=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
     )
 
 
 @celery_app.task(bind=True)
-def normalize_stored_email(
-    self,
-):
+def normalize_stored_email(self):
+    """
+    Normaliza emails armazenados em ResearcherIdentifier.
+
+    Processa todos os identificadores de tipo EMAIL que não estão
+    normalizados, extraindo e salvando o email normalizado.
+
+    Args:
+        self: Instância da tarefa Celery
+
+    Returns:
+        None
+
+    Side Effects:
+        - Atualiza campo identifier de múltiplos ResearcherIdentifier
+        - Realiza bulk_update para otimizar performance
+    """
     updated_list = []
     re_identifiers = get_researcher_identifier_unnormalized()
 
@@ -365,38 +584,54 @@ def task_get_opac_xmls(
     auto_solve_pid_conflict=None,
 ):
     """
-    API Response
-    {
-        "begin_date":"2023-06-01 00-00-00",
-        "collection":"scl",
-        "dictionary_date": "Sat, 01 Jul 2023 00:00:00 GMT",
-        "documents":{
-            "JFhVphtq6czR6PHMvC4w38N": {
-                "aop_pid":"",
-                "create":"Sat, 28 Nov 2020 23:42:43 GMT",
-                "default_language":"en",
-                "journal_acronym":"aabc",
-                "pid":"S0001-37652012000100017",
-                "pid_v1":"S0001-3765(12)08400117",
-                "pid_v2":"S0001-37652012000100017",
-                "pid_v3":"JFhVphtq6czR6PHMvC4w38N",
-                "publication_date":"2012-05-22",
-                "update":"Fri, 30 Jun 2023 20:57:30 GMT"
-            },
-            "ZZYxjr9xbVHWmckYgDwBfTc":{
-                "aop_pid":"",
-                "create":"Sat, 28 Nov 2020 23:42:37 GMT",
-                "default_language":"en",
-                "journal_acronym":"aabc",
-                "pid":"S0001-37652012000100014",
-                "pid_v1":"S0001-3765(12)08400114",
-                "pid_v2":"S0001-37652012000100014",
-                "pid_v3":"ZZYxjr9xbVHWmckYgDwBfTc",
-                "publication_date":"2012-02-24",
-                "update":"Fri, 30 Jun 2023 20:56:59 GMT",
+    Obtém e processa XMLs de artigos do OPAC via API.
+
+    Coleta metadados de artigos através da API do OPAC e dispara
+    o processamento dos XMLs correspondentes.
+
+    Args:
+        self: Instância da tarefa Celery
+        username (str, optional): Nome do usuário executando a tarefa
+        user_id (int, optional): ID do usuário executando a tarefa
+        begin_date (str, optional): Data inicial no formato YYYY-MM-DD. Default: "2000-01-01"
+        end_date (str, optional): Data final no formato YYYY-MM-DD. Default: data atual
+        limit (int, optional): Limite de documentos por página. Default: 100
+        pages (int, optional): Número total de páginas a processar
+        force_update (bool, optional): Se True, força atualização mesmo se já existe
+        domain (str, optional): Domínio do OPAC. Default: "www.scielo.br"
+        collection_acron (str, optional): Acrônimo da coleção. Default: "scl"
+        timeout (int, optional): Timeout em segundos para requisições. Default: 5
+        auto_solve_pid_conflict (bool, optional): Se True, resolve conflitos de PID automaticamente
+
+    Returns:
+        None
+
+    Side Effects:
+        - Cria/atualiza ArticleSource para cada artigo encontrado
+        - Processa XMLs através de ArticleSource.process_xml()
+        - Registra UnexpectedEvent em caso de erro
+
+    API Response Example:
+        {
+            "begin_date":"2023-06-01 00-00-00",
+            "collection":"scl",
+            "dictionary_date": "Sat, 01 Jul 2023 00:00:00 GMT",
+            "pages": 10,
+            "documents":{
+                "JFhVphtq6czR6PHMvC4w38N": {
+                    "aop_pid":"",
+                    "create":"Sat, 28 Nov 2020 23:42:43 GMT",
+                    "default_language":"en",
+                    "journal_acronym":"aabc",
+                    "pid":"S0001-37652012000100017",
+                    "pid_v1":"S0001-3765(12)08400117",
+                    "pid_v2":"S0001-37652012000100017",
+                    "pid_v3":"JFhVphtq6czR6PHMvC4w38N",
+                    "publication_date":"2012-05-22",
+                    "update":"Fri, 30 Jun 2023 20:57:30 GMT"
+                }
             }
         }
-    }
     """
     page = 1
     domain = domain or "www.scielo.br"
@@ -479,6 +714,25 @@ def task_load_article_from_article_source(
     status__in=None,
     auto_solve_pid_conflict=None,
 ):
+    """
+    Processa XMLs armazenados em ArticleSource para criar/atualizar artigos.
+
+    Args:
+        self: Instância da tarefa Celery
+        username (str, optional): Nome do usuário executando a tarefa
+        user_id (int, optional): ID do usuário executando a tarefa
+        force_update (bool, optional): Se True, força reprocessamento
+        status__in (list, optional): Lista de status para filtrar ArticleSource
+        auto_solve_pid_conflict (bool, optional): Se True, resolve conflitos de PID automaticamente
+
+    Returns:
+        None
+
+    Side Effects:
+        - Processa XMLs através de ArticleSource.process_xmls()
+        - Cria/atualiza artigos no banco de dados
+        - Registra UnexpectedEvent em caso de erro
+    """
     try:
         user = _get_user(self.request, username=username, user_id=user_id)
         ArticleSource.process_xmls(
@@ -514,21 +768,46 @@ def task_export_articles_to_articlemeta(
     username=None,
 ):
     """
-    Export articles to ArticleMeta Database with flexible filtering.
-    Note that from_date and until_date filters work on the field `updated` from Article.
-    
+    Exporta artigos em lote para o banco de dados ArticleMeta.
+
+    Permite filtrar artigos por diversos critérios antes da exportação.
+    Os filtros from_date e until_date operam sobre o campo 'updated' de Article.
+
     Args:
-        collections: Filter by collections (e.g. ['scl', 'mex'])
-        issn: Filter by journal ISSN
-        number: Filter by specific number
-        volume: Filter by specific volume
-        year_of_publication: Filter by publication year
-        from_date: Filter by date range (start date)
-        until_date: Filter by date range (end date)
-        days_to_go_back: Filter by date range (days to go back from today or until_date)
-        force_update: Force update existing records
-        user_id: User ID
-        username: Username
+        self: Instância da tarefa Celery
+        collections (list, optional): Lista de acrônimos de coleções. Ex: ['scl', 'mex']
+        issn (str, optional): ISSN do periódico para filtrar artigos
+        number (str, optional): Número específico da edição
+        volume (str, optional): Volume específico da edição
+        year_of_publication (int, optional): Ano de publicação
+        from_date (str, optional): Data inicial para filtro (formato ISO)
+        until_date (str, optional): Data final para filtro (formato ISO)
+        days_to_go_back (int, optional): Número de dias para retroceder a partir de hoje ou until_date
+        force_update (bool): Se True, força atualização de registros existentes. Default: True
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        dict: Estatísticas da exportação incluindo total processado, sucessos e falhas
+
+    Side Effects:
+        - Exporta artigos para o banco ArticleMeta
+        - Atualiza registros existentes se force_update=True
+
+    Examples:
+        # Exportar artigos de uma coleção específica
+        task_export_articles_to_articlemeta.delay(
+            collections=['scl'],
+            from_date='2024-01-01',
+            until_date='2024-12-31'
+        )
+
+        # Exportar artigos de um periódico específico
+        task_export_articles_to_articlemeta.delay(
+            issn='1234-5678',
+            year_of_publication=2024,
+            force_update=True
+        )
     """
     user = _get_user(self.request, username=username, user_id=user_id)
 
@@ -548,18 +827,36 @@ def task_export_articles_to_articlemeta(
 
 
 @celery_app.task(bind=True, name="task_export_article_to_articlemeta")
-def task_export_article_to_articlemeta(self, pid_v3=None, force_update=True, user_id=None, username=None):
+def task_export_article_to_articlemeta(
+    self, pid_v3=None, force_update=True, user_id=None, username=None
+):
     """
-    Export a single article to ArticleMeta Database.
+    Exporta um único artigo para o banco de dados ArticleMeta.
 
     Args:
-        pid_v3: Article PID v3
-        force_update: Force update existing records
-        user_id: User ID
-        username: Username
+        self: Instância da tarefa Celery
+        pid_v3 (str): Identificador PID v3 do artigo a ser exportado
+        force_update (bool): Se True, força atualização mesmo se já existe. Default: True
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
 
     Returns:
-        bool: True if export was successful, False otherwise.
+        bool: True se a exportação foi bem-sucedida, False caso contrário
+
+    Raises:
+        Article.DoesNotExist: Se o artigo com o pid_v3 fornecido não existir
+
+    Side Effects:
+        - Exporta artigo para o banco ArticleMeta
+        - Atualiza registro existente se force_update=True
+
+    Example:
+        # Exportar um artigo específico
+        task_export_article_to_articlemeta.delay(
+            pid_v3='JFhVphtq6czR6PHMvC4w38N',
+            force_update=True,
+            user_id=1
+        )
     """
     user = _get_user(self.request, username=username, user_id=user_id)
 
