@@ -10,7 +10,8 @@ from core.mongodb import write_to_db
 from institution.models import Sponsor
 from tracker.models import UnexpectedEvent
 from journal.models import SciELOJournal
-
+from pid_provider.models import PidProviderXML
+from pid_provider.choices import PPXML_STATUS_TODO
 from .models import Article, ArticleExport, ArticleFunding
 
 
@@ -297,3 +298,42 @@ def bulk_export_articles_to_articlemeta(
         )
 
     logging.info(f"Export completed.")
+
+
+def get_pp_xml_ids_to_load_articles(
+    collection_list=None,
+    issn_list=None,
+    from_pub_year=None,
+    until_pub_year=None,
+    from_processing_date=None,
+    until_processing_date=None,
+    proc_status_list=None,
+):
+    params = {}
+    issn_print_list = []
+    issn_electronic_list = []
+    if not issn_list and collection_list:
+        issns = SciELOJournal.get_issn_list(collection_list)
+        issn_print_list = issns["issn_print_list"]
+        issn_electronic_list = issns["issn_electronic_list"]
+    if issn_list:
+        q = Q(issn_print__in=issn_list+issn_print_list) | Q(issn_electronic__in=issn_list+issn_electronic_list)
+    else:
+        q = Q()
+
+    if from_processing_date:
+        params["updated__gte"] = from_processing_date
+    if until_processing_date:
+        params["updated__lte"] = until_processing_date
+
+    if from_pub_year:
+        params["pub_year__gte"] = from_pub_year
+    if until_pub_year:
+        params["pub_year__lte"] = until_pub_year
+
+    if proc_status_list:
+        params["proc_status__in"] = proc_status_list
+    else:
+        params["proc_status__in"] = [PPXML_STATUS_TODO]
+
+    return PidProviderXML.objects.filter(q, **params).values_list("id", flat=True)

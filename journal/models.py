@@ -1790,6 +1790,17 @@ class SciELOJournal(CommonControlField, ClusterableModel, SocialNetwork):
         obj.save()
         return obj
 
+    @classmethod
+    def get_issn_list(cls, collection_list):
+        params = {}
+        if collection_list:
+            params["collection__acron__in"] = collection_list
+        qs = cls.objects.filter(**params)
+        return {
+            "issn_print_list": qs.values_list("journal__official__issn_print", flat=True),
+            "issn_electronic_list": qs.values_list("journal__official__issn_electronic", flat=True),
+        }
+
 
 class SciELOJournalExport(CommonControlField):
     """
