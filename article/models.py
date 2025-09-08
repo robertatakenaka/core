@@ -337,6 +337,46 @@ class Article(
                 detail=None,
             )
 
+    @classmethod
+    def get_items_to_complete_data(cls, journal_ids=None, from_pub_year=None, until_pub_year=None):
+        params = {}
+        if journal_ids:
+            params["journal__pk"] = journal_ids
+        if from_pub_year:
+            params["pub_date_year__gte"] = from_pub_year
+        if until_pub_year:
+            params["pub_date_year__lte"] = until_pub_year
+
+        return cls.objects.filter(
+            Q(sps_pkg_name__isnull=True) |
+            Q(pp_xml__isnull=True) |
+            Q(article_license__isnull=True),
+            **params,
+        )
+
+    def complete_data(self, pp_xml):
+        save = False
+        if pp_xml:
+            if not self.sps_pkg_name:
+                self.sps_pkg_name = pp_xml.pkg_name
+                save = True
+            if not self.pp_xml:
+                self.pp_xml = pp_xml
+                save = True
+
+        if not self.article_license:
+            try:
+                self.article_license = self.license.license_type
+                save = True
+            except (TypeError, ValueError, AttributeError):
+                try:
+                    self.article_license = self.license_statements.first().license.license_type
+                    save = True
+                except (TypeError, ValueError, AttributeError):
+                    pass
+        if save:
+            self.save()
+
     def set_date_pub(self, dates):
         if dates:
             self.pub_date_day = dates.get("day")
