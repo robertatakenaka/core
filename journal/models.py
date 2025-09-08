@@ -1791,15 +1791,26 @@ class SciELOJournal(CommonControlField, ClusterableModel, SocialNetwork):
         return obj
 
     @classmethod
-    def get_issn_list(cls, collection_list):
+    def select_journals(cls, collection_acron_list=None, journal_acron_list=None):
         params = {}
-        if collection_list:
-            params["collection__acron__in"] = collection_list
-        qs = cls.objects.filter(**params)
+        if collection_acron_list:
+            params["collection__acron__in"] = collection_acron_list
+        if journal_acron_list:
+            params["journal_acron__in"] = journal_acron_list
+        return cls.objects.filter(**params)
+
+    @classmethod
+    def get_issn_list(cls, collection_acron_list=None, journal_acron_list=None):
+        qs = cls.select_journals(collection_acron_list, journal_acron_list)
         return {
             "issn_print_list": qs.values_list("journal__official__issn_print", flat=True),
             "issn_electronic_list": qs.values_list("journal__official__issn_electronic", flat=True),
         }
+
+    @classmethod
+    def get_journal_ids(cls, collection_acron_list=None, journal_acron_list=None):
+        qs = cls.select_journals(collection_acron_list, journal_acron_list)
+        return qs.values_list("id", flat=True)
 
 
 class SciELOJournalExport(CommonControlField):
