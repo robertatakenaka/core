@@ -520,6 +520,19 @@ class ResearcherIdentifier(CommonControlField, ClusterableModel):
         except cls.DoesNotExist:
             return cls._create(user, identifier, source_name)
 
+    @classmethod
+    def get_items_with_invalid_email(cls):
+        """
+        Obtém identificadores de pesquisador com emails não normalizados.
+
+        Returns:
+            QuerySet: ResearcherIdentifier com source_name="EMAIL" que não
+                     correspondem ao padrão de email válido
+        """
+        return cls.objects.filter(source_name="EMAIL").exclude(
+            identifier__regex=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+        )
+
 
 class ResearcherAKA(CommonControlField, Orderable):
     researcher_identifier = ParentalKey(

@@ -25,6 +25,20 @@ from tracker.models import UnexpectedEvent
 User = get_user_model()
 
 
+
+# ==============================================================================
+# TAREFAS DE CARREGAMENTO E IMPORTAÇÃO / LOADING AND IMPORT TASKS
+# ==============================================================================
+
+
+
+# ==============================================================================
+# TAREFAS DE COMPLETAÇÃO DOS DADOS
+# ==============================================================================
+
+
+# ==============================================================================
+
 @celery_app.task()
 def load_funding_data(user, file_path):
     """
@@ -42,32 +56,6 @@ def load_funding_data(user, file_path):
     """
     user = User.objects.get(pk=user)
     controller.read_file(user, file_path)
-
-
-def _items_to_load_article():
-    """
-    Retorna um iterador de objetos PidProviderXML pendentes de processamento.
-
-    Returns:
-        QuerySet iterator: Iterador de objetos PidProviderXML com status TODO
-    """
-    return (
-        PidProviderXML.objects.select_related("current_version")
-        .filter(proc_status=PPXML_STATUS_TODO)
-        .iterator()
-    )
-
-
-def items_to_load_article_with_valid_false():
-    """
-    Retorna objetos PidProviderXML correspondentes a artigos marcados como inválidos.
-
-    Returns:
-        QuerySet iterator: Iterador de objetos PidProviderXML onde o campo pid_v3 
-                          corresponde a artigos com valid=False
-    """
-    articles = Article.objects.filter(valid=False).values("pid_v3")
-    return PidProviderXML.objects.filter(v3__in=Subquery(articles)).iterator()
 
 
 @celery_app.task(bind=True, name="task_load_articles")
@@ -451,23 +439,22 @@ def transfer_license_statements_fk_to_article_license(
         logging.info("The article_license of model Articles have been updated")
 
 
-def remove_duplicate_articles(pid_v3=None):
+@celery_app.task(bind=True)
+def remove_duplicate_articles_task(self, user_id=None, username=None, pid_v3=None):
     """
-    Remove artigos duplicados baseando-se no pid_v3.
-
-    Mantém apenas o artigo mais antigo (baseado em created) quando
-    existem duplicatas com valid=False.
+    Tarefa Celery para remover artigos duplicados.
 
     Args:
-        pid_v3 (str, optional): Se fornecido, remove duplicatas apenas 
-                               para este pid_v3 específico
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário (não utilizado)
+        username (str, optional): Nome do usuário (não utilizado)
+        pid_v3 (str, optional): PID v3 específico para remover duplicatas
 
     Returns:
         None
 
     Side Effects:
-        - Remove artigos duplicados do banco de dados
-        - Registra UnexpectedEvent em caso de erro
+        - Chama remove_duplicate_articles() para executar a remoção
     """
     ids_to_exclude = []
     try:
@@ -506,39 +493,6 @@ def remove_duplicate_articles(pid_v3=None):
 
 
 @celery_app.task(bind=True)
-def remove_duplicate_articles_task(self, user_id=None, username=None, pid_v3=None):
-    """
-    Tarefa Celery para remover artigos duplicados.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário (não utilizado)
-        username (str, optional): Nome do usuário (não utilizado)
-        pid_v3 (str, optional): PID v3 específico para remover duplicatas
-
-    Returns:
-        None
-
-    Side Effects:
-        - Chama remove_duplicate_articles() para executar a remoção
-    """
-    remove_duplicate_articles(pid_v3)
-
-
-def get_researcher_identifier_unnormalized():
-    """
-    Obtém identificadores de pesquisador com emails não normalizados.
-
-    Returns:
-        QuerySet: ResearcherIdentifier com source_name="EMAIL" que não
-                 correspondem ao padrão de email válido
-    """
-    return ResearcherIdentifier.objects.filter(source_name="EMAIL").exclude(
-        identifier__regex=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    )
-
-
-@celery_app.task(bind=True)
 def normalize_stored_email(self):
     """
     Normaliza emails armazenados em ResearcherIdentifier.
@@ -557,7 +511,7 @@ def normalize_stored_email(self):
         - Realiza bulk_update para otimizar performance
     """
     updated_list = []
-    re_identifiers = get_researcher_identifier_unnormalized()
+    re_identifiers = ResearcherIdentifier.get_items_with_invalid_email()
 
     for re_identifier in re_identifiers:
         email = extracts_normalized_email(raw_email=re_identifier.identifier)
