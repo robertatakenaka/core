@@ -302,7 +302,7 @@ def bulk_export_articles_to_articlemeta(
 
 def get_pp_xml_ids_to_load_articles(
     collection_list=None,
-    issn_list=None,
+    journal_acron_list=None,
     from_pub_year=None,
     until_pub_year=None,
     from_processing_date=None,
@@ -310,16 +310,19 @@ def get_pp_xml_ids_to_load_articles(
     proc_status_list=None,
 ):
     params = {}
-    issn_print_list = []
-    issn_electronic_list = []
-    if not issn_list and collection_list:
-        issns = SciELOJournal.get_issn_list(collection_list)
+
+    q = Q()
+    if journal_acron_list or collection_list:
+        issns = SciELOJournal.get_issn_list(collection_list, journal_acron_list)
         issn_print_list = issns["issn_print_list"]
         issn_electronic_list = issns["issn_electronic_list"]
-    if issn_list:
-        q = Q(issn_print__in=issn_list+issn_print_list) | Q(issn_electronic__in=issn_list+issn_electronic_list)
-    else:
-        q = Q()
+
+        if issn_print_list or issn_electronic_list:
+            q = Q(issn_print__in=issn_print_list) | Q(issn_electronic__in=issn_electronic_list)
+        elif issn_print_list:
+            q = Q(issn_print__in=issn_print_list)
+        elif issn_electronic_list:
+            q = Q(issn_electronic__in=issn_electronic_list)
 
     if from_processing_date:
         params["updated__gte"] = from_processing_date
