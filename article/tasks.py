@@ -25,160 +25,44 @@ from tracker.models import UnexpectedEvent
 User = get_user_model()
 
 
+# ==============================================================================
+# SUMÁRIO DE TAREFAS CELERY / CELERY TASKS SUMMARY
+# ==============================================================================
+#
+# TAREFAS DE IMPORTAÇÃO E CARREGAMENTO / IMPORT AND LOADING TASKS
+# - load_preprint: Coleta e carrega preprints de servidor OAI-PMH
+# - task_get_opac_xmls: Obtém XMLs de artigos do OPAC via API
+# - task_load_article_from_article_source: Processa XMLs de ArticleSource
+# - task_load_articles: Carrega artigos de PidProviderXML
+#
+# TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
+# - load_funding_data: Carrega dados de financiamento da pesquisa
+# - task_articles_complete_data: Dispara complementação em lote
+# - article_complete_data: Completa dados de um artigo específico
+# - transfer_license_statements_fk_to_article_license: Migra dados de licença
+# - normalize_stored_email: Normaliza emails em ResearcherIdentifier
+#
+# TAREFAS DE LIMPEZA E MANUTENÇÃO / CLEANUP AND MAINTENANCE TASKS
+# - task_mark_articles_as_deleted_without_pp_xml: Marca artigos órfãos como deletados
+# - remove_duplicate_articles_task: Remove artigos duplicados
+#
+# TAREFAS DE CONVERSÃO E FORMATAÇÃO / CONVERSION AND FORMATTING TASKS
+# - task_convert_xml_to_other_formats_for_articles: Dispara conversão em lote
+# - convert_xml_to_other_formats: Converte XML para outros formatos
+#
+# TAREFAS DE EXPORTAÇÃO / EXPORT TASKS
+# - task_export_articles_to_articlemeta: Exporta artigos em lote para ArticleMeta
+# - task_export_article_to_articlemeta: Exporta um artigo para ArticleMeta
+# ==============================================================================
+
 
 # ==============================================================================
 # TAREFAS DE IMPORTAÇÃO E CARREGAMENTO / IMPORT AND LOADING TASKS
-# TAREFAS DE CARREGAMENTO / LOADING TASKS
-# TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
-# TAREFAS DE LIMPEZA E MANUTENÇÃO / CLEANUP AND MAINTENANCE TASKS
-# TAREFAS DE CONVERSÃO E FORMATAÇÃO / CONVERSION AND FORMATTING TASKS
-# TAREFAS DE EXPORTAÇÃO / EXPORT TASKS
+# - load_preprint: Coleta e carrega preprints de servidor OAI-PMH
+# - task_get_opac_xmls: Obtém XMLs de artigos do OPAC via API
+# - task_load_article_from_article_source: Processa XMLs de ArticleSource
+# - task_load_articles: Carrega artigos de PidProviderXML
 # ==============================================================================
-
-
-
-
-# ==============================================================================
-
-@celery_app.task()
-def load_funding_data(user, file_path):
-    """
-    Carrega dados de financiamento a partir de um arquivo.
-
-    Args:
-        user: ID do usuário que está executando a operação
-        file_path (str): Caminho para o arquivo contendo dados de financiamento
-
-    Returns:
-        None
-
-    Raises:
-        User.DoesNotExist: Se o usuário não for encontrado
-    """
-    user = User.objects.get(pk=user)
-    controller.read_file(user, file_path)
-
-
-@celery_app.task(bind=True, name="task_load_articles")
-def task_load_articles(
-    self,
-    user_id=None,
-    username=None,
-):
-    """
-    Tarefa para carregar artigos a partir de arquivos XML do PidProvider.
-
-    Processa todos os objetos PidProviderXML com status TODO, carregando
-    os artigos correspondentes e marcando como DONE quando processados
-    com sucesso.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-
-    Returns:
-        None
-
-    Side Effects:
-        - Cria/atualiza artigos no banco de dados
-        - Atualiza status de PidProviderXML para DONE quando bem-sucedido
-        - Registra UnexpectedEvent em caso de erro
-        - Dispara tarefa de marcação de artigos deletados após conclusão
-    """
-    try:
-        user = _get_user(self.request, username, user_id)
-
-        generator_articles = (
-            PidProviderXML.objects.select_related("current_version")
-            .filter(proc_status=PPXML_STATUS_TODO)
-            .iterator()
-        )
-
-        for item in generator_articles:
-            try:
-                article = load_article(
-                    user,
-                    file_path=item.current_version.file.path,
-                    v3=item.v3,
-                    pp_xml=item,
-                )
-                if article and article.valid:
-                    item.proc_status = PPXML_STATUS_DONE
-                    item.save()
-            except Exception as exception:
-                exc_type, exc_value, exc_traceback = sys.exc_info()
-                UnexpectedEvent.create(
-                    exception=exception,
-                    exc_traceback=exc_traceback,
-                    detail={
-                        "task": "article.tasks.load_articles",
-                        "item": str(item),
-                    },
-                )
-
-        task_mark_articles_as_deleted_without_pp_xml.apply_async(
-            kwargs=dict(
-                user_id=user_id or user.id,
-                username=username or user.username,
-            )
-        )
-    except Exception as exception:
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        UnexpectedEvent.create(
-            exception=exception,
-            exc_traceback=exc_traceback,
-            detail={
-                "task": "article.tasks.load_articles",
-            },
-        )
-
-
-@celery_app.task(bind=True, name="task_mark_articles_as_deleted_without_pp_xml")
-def task_mark_articles_as_deleted_without_pp_xml(self, user_id=None, username=None):
-    """
-    Marca artigos como deletados quando não possuem referência PidProviderXML.
-
-    Esta tarefa identifica artigos órfãos (sem pp_xml associado) e os marca
-    com status DATA_STATUS_DELETED.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-
-    Returns:
-        None
-
-    Side Effects:
-        - Atualiza status de artigos sem pp_xml para DATA_STATUS_DELETED
-        - Registra quantidade de artigos atualizados no log
-        - Registra UnexpectedEvent em caso de erro
-    """
-    try:
-        user = _get_user(self.request, username, user_id)
-
-        updated_count = Article.mark_as_deleted_articles_without_pp_xml(user)
-
-        logging.info(
-            f"Task completed successfully. {updated_count} articles marked as deleted."
-        )
-
-    except Exception as exception:
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        UnexpectedEvent.create(
-            exception=exception,
-            exc_traceback=exc_traceback,
-            detail={
-                "task": "article.tasks.task_mark_articles_as_deleted_without_pp_xml",
-            },
-        )
-
-        logging.error(
-            f"Error in task_mark_articles_as_deleted_without_pp_xml: {exception}"
-        )
-
-
 @celery_app.task(bind=True, name=_("load_preprints"))
 def load_preprint(self, user_id, oai_pmh_preprint_uri):
     """
@@ -198,330 +82,7 @@ def load_preprint(self, user_id, oai_pmh_preprint_uri):
     user = User.objects.get(pk=user_id)
     ## fazer filtro para não coletar tudo sempre
     harvest_preprints(oai_pmh_preprint_uri, user)
-
-
-@celery_app.task(bind=True)
-def task_convert_xml_to_other_formats_for_articles(
-    self, user_id=None, username=None, from_date=None, force_update=False
-):
-    """
-    Dispara conversão de XML para outros formatos para todos os artigos.
-
-    Processa todos os artigos com sps_pkg_name definido, disparando
-    tarefas assíncronas individuais para conversão de formato.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-        from_date (str, optional): Data inicial para filtrar artigos (não utilizado)
-        force_update (bool): Se True, força atualização mesmo se já convertido
-
-    Returns:
-        None
-
-    Side Effects:
-        - Dispara múltiplas tarefas assíncronas convert_xml_to_other_formats
-        - Registra UnexpectedEvent em caso de erro
-    """
-    try:
-        user = _get_user(self.request, username, user_id)
-
-        for item in Article.objects.filter(sps_pkg_name__isnull=False).iterator():
-            logging.info(item.pid_v3)
-            try:
-                convert_xml_to_other_formats.apply_async(
-                    kwargs={
-                        "user_id": user.id,
-                        "username": user.username,
-                        "item_id": item.id,
-                        "force_update": force_update,
-                    }
-                )
-            except Exception as exception:
-                exc_type, exc_value, exc_traceback = sys.exc_info()
-                UnexpectedEvent.create(
-                    exception=exception,
-                    exc_traceback=exc_traceback,
-                    detail={
-                        "task": "article.tasks.task_convert_xml_to_other_formats_for_articles",
-                        "item": str(item),
-                    },
-                )
-    except Exception as exception:
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        UnexpectedEvent.create(
-            exception=exception,
-            exc_traceback=exc_traceback,
-            detail={
-                "task": "article.tasks.task_convert_xml_to_other_formats_for_articles",
-            },
-        )
-
-
-@celery_app.task(bind=True)
-def convert_xml_to_other_formats(
-    self, user_id=None, username=None, item_id=None, force_update=None
-):
-    """
-    Converte XML de um artigo específico para outros formatos.
-
-    Gera formatos alternativos (PDF, HTML, etc.) a partir do XML do artigo.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-        item_id (int): ID do artigo a ser convertido
-        force_update (bool, optional): Se True, força reconversão mesmo se já existe
-
-    Returns:
-        None
-
-    Side Effects:
-        - Cria/atualiza registros ArticleFormat
-        - Registra progresso no log
-    """
-    user = _get_user(self.request, username, user_id)
-
-    try:
-        article = Article.objects.get(pk=item_id)
-    except Article.DoesNotExist:
-        logging.info(f"Not found {item_id}")
-        return
-
-    done = False
-    try:
-        article_format = ArticleFormat.objects.get(article=article)
-        done = True
-    except ArticleFormat.MultipleObjectsReturned:
-        done = True
-    except ArticleFormat.DoesNotExist:
-        done = False
-    logging.info(f"Done {done}")
-
-    if not done or force_update:
-        ArticleFormat.generate_formats(user, article=article)
-
-
-@celery_app.task(bind=True)
-def task_articles_complete_data(
-    self, user_id=None, username=None, from_date=None, force_update=False
-):
-    """
-    Dispara complementação de dados para todos os artigos.
-
-    Processa todos os artigos, disparando tarefas assíncronas individuais
-    para completar dados faltantes.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-        from_date (str, optional): Data inicial para filtrar artigos (não utilizado)
-        force_update (bool): Se True, força atualização mesmo se dados já existem
-
-    Returns:
-        None
-
-    Side Effects:
-        - Dispara múltiplas tarefas assíncronas article_complete_data
-        - Registra UnexpectedEvent em caso de erro
-    """
-    try:
-        user = _get_user(self.request, username, user_id)
-
-        for item in Article.objects.iterator():
-            try:
-                article_complete_data.apply_async(
-                    kwargs={
-                        "user_id": user.id,
-                        "username": user.username,
-                        "item_id": item.id,
-                    }
-                )
-            except Exception as exception:
-                exc_type, exc_value, exc_traceback = sys.exc_info()
-                UnexpectedEvent.create(
-                    exception=exception,
-                    exc_traceback=exc_traceback,
-                    detail={
-                        "task": "article.tasks.task_articles_complete_data",
-                        "item": str(item),
-                    },
-                )
-    except Exception as exception:
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        UnexpectedEvent.create(
-            exception=exception,
-            exc_traceback=exc_traceback,
-            detail={
-                "task": "article.tasks.task_articles_complete_data",
-            },
-        )
-
-
-@celery_app.task(bind=True)
-def article_complete_data(
-    self, user_id=None, username=None, item_id=None, force_update=None
-):
-    """
-    Completa dados faltantes de um artigo específico.
-
-    Atualmente preenche o campo sps_pkg_name baseado no pid_v3.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-        item_id (int): ID do artigo a ser processado
-        force_update (bool, optional): Se True, força atualização (não utilizado)
-
-    Returns:
-        None
-
-    Side Effects:
-        - Atualiza campo sps_pkg_name do artigo se necessário
-    """
-    user = _get_user(self.request, username, user_id)
-    try:
-        item = Article.objects.get(pk=item_id)
-        if item.pid_v3 and not item.sps_pkg_name:
-            item.sps_pkg_name = PidProvider.get_sps_pkg_name(item.pid_v3)
-            item.save()
-    except Article.DoesNotExist:
-        pass
-
-
-@celery_app.task(bind=True)
-def transfer_license_statements_fk_to_article_license(
-    self, user_id=None, username=None
-):
-    """
-    Migra dados de licença do modelo antigo para o campo article_license.
-
-    Transfere informações de license_statements ou license para o novo
-    campo unificado article_license.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-
-    Returns:
-        None
-
-    Side Effects:
-        - Atualiza campo article_license de múltiplos artigos
-        - Registra atualização no log quando houver mudanças
-    """
-    user = _get_user(self.request, username, user_id)
-    articles_to_update = []
-    for instance in Article.objects.filter(article_license__isnull=True):
-
-        new_license = None
-        if (
-            instance.license_statements.exists()
-            and instance.license_statements.first().url
-        ):
-            new_license = instance.license_statements.first().url
-        elif instance.license and instance.license.license_type:
-            new_license = instance.license.license_type
-
-        if new_license:
-            instance.article_license = new_license
-            instance.updated_by = user
-            articles_to_update.append(instance)
-
-    if articles_to_update:
-        Article.objects.bulk_update(
-            articles_to_update, ["article_license", "updated_by"]
-        )
-        logging.info("The article_license of model Articles have been updated")
-
-
-@celery_app.task(bind=True)
-def remove_duplicate_articles_task(self, user_id=None, username=None, pid_v3=None):
-    """
-    Tarefa Celery para remover artigos duplicados.
-
-    Args:
-        self: Instância da tarefa Celery
-        user_id (int, optional): ID do usuário (não utilizado)
-        username (str, optional): Nome do usuário (não utilizado)
-        pid_v3 (str, optional): PID v3 específico para remover duplicatas
-
-    Returns:
-        None
-
-    Side Effects:
-        - Chama remove_duplicate_articles() para executar a remoção
-    """
-    ids_to_exclude = []
-    try:
-        if pid_v3:
-            duplicates = (
-                Article.objects.filter(pid_v3=pid_v3)
-                .values("pid_v3")
-                .annotate(pid_v3_count=Count("pid_v3"))
-                .filter(pid_v3_count__gt=1, valid=False)
-            )
-        else:
-            duplicates = (
-                Article.objects.values("pid_v3")
-                .annotate(pid_v3_count=Count("pid_v3"))
-                .filter(pid_v3_count__gt=1, valid=False)
-            )
-        for duplicate in duplicates:
-            article_ids = (
-                Article.objects.filter(pid_v3=duplicate["pid_v3"])
-                .order_by("created")[1:]
-                .values_list("id", flat=True)
-            )
-            ids_to_exclude.extend(article_ids)
-
-        if ids_to_exclude:
-            Article.objects.filter(id__in=ids_to_exclude).delete()
-    except Exception as exception:
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        UnexpectedEvent.create(
-            exception=exception,
-            exc_traceback=exc_traceback,
-            detail={
-                "task": "article.tasks.remove_duplicates_articles",
-            },
-        )
-
-
-@celery_app.task(bind=True)
-def normalize_stored_email(self):
-    """
-    Normaliza emails armazenados em ResearcherIdentifier.
-
-    Processa todos os identificadores de tipo EMAIL que não estão
-    normalizados, extraindo e salvando o email normalizado.
-
-    Args:
-        self: Instância da tarefa Celery
-
-    Returns:
-        None
-
-    Side Effects:
-        - Atualiza campo identifier de múltiplos ResearcherIdentifier
-        - Realiza bulk_update para otimizar performance
-    """
-    updated_list = []
-    re_identifiers = ResearcherIdentifier.get_items_with_invalid_email()
-
-    for re_identifier in re_identifiers:
-        email = extracts_normalized_email(raw_email=re_identifier.identifier)
-        if email:
-            re_identifier.identifier = email
-            updated_list.append(re_identifier)
-
-    ResearcherIdentifier.objects.bulk_update(updated_list, ["identifier"])
-
+ 
 
 @celery_app.task(bind=True, name="task_get_opac_xmls")
 def task_get_opac_xmls(
@@ -707,6 +268,498 @@ def task_load_article_from_article_source(
         )
 
 
+@celery_app.task(bind=True, name="task_load_articles")
+def task_load_articles(
+    self,
+    user_id=None,
+    username=None,
+):
+    """
+    Tarefa para carregar artigos a partir de arquivos XML do PidProvider.
+
+    Processa todos os objetos PidProviderXML com status TODO, carregando
+    os artigos correspondentes e marcando como DONE quando processados
+    com sucesso.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        None
+
+    Side Effects:
+        - Cria/atualiza artigos no banco de dados
+        - Atualiza status de PidProviderXML para DONE quando bem-sucedido
+        - Registra UnexpectedEvent em caso de erro
+        - Dispara tarefa de marcação de artigos deletados após conclusão
+    """
+    try:
+        user = _get_user(self.request, username, user_id)
+
+        generator_articles = (
+            PidProviderXML.objects.select_related("current_version")
+            .filter(proc_status=PPXML_STATUS_TODO)
+            .iterator()
+        )
+
+        for item in generator_articles:
+            try:
+                article = load_article(
+                    user,
+                    file_path=item.current_version.file.path,
+                    v3=item.v3,
+                    pp_xml=item,
+                )
+                if article and article.valid:
+                    item.proc_status = PPXML_STATUS_DONE
+                    item.save()
+            except Exception as exception:
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                UnexpectedEvent.create(
+                    exception=exception,
+                    exc_traceback=exc_traceback,
+                    detail={
+                        "task": "article.tasks.load_articles",
+                        "item": str(item),
+                    },
+                )
+
+        task_mark_articles_as_deleted_without_pp_xml.apply_async(
+            kwargs=dict(
+                user_id=user_id or user.id,
+                username=username or user.username,
+            )
+        )
+    except Exception as exception:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=exception,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.load_articles",
+            },
+        )
+
+
+# ==============================================================================
+# TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
+# - load_funding_data: Carrega dados de financiamento da pesquisa
+# - task_articles_complete_data: Dispara complementação em lote
+# - article_complete_data: Completa dados de um artigo específico
+# - transfer_license_statements_fk_to_article_license: Migra dados de licença
+# - normalize_stored_email: Normaliza emails em ResearcherIdentifier
+# ==============================================================================
+@celery_app.task()
+def load_funding_data(user, file_path):
+    """
+    Carrega dados de financiamento a partir de um arquivo.
+
+    Args:
+        user: ID do usuário que está executando a operação
+        file_path (str): Caminho para o arquivo contendo dados de financiamento
+
+    Returns:
+        None
+
+    Raises:
+        User.DoesNotExist: Se o usuário não for encontrado
+    """
+    user = User.objects.get(pk=user)
+    controller.read_file(user, file_path)
+
+
+# ==============================================================================
+# TAREFAS DE ATUALIZAÇÃO E COMPLEMENTAÇÃO DE DADOS / DATA UPDATE TASKS
+# - task_articles_complete_data: Dispara complementação em lote
+# - article_complete_data: Completa dados de um artigo específico
+# - transfer_license_statements_fk_to_article_license: Migra dados de licença
+# - normalize_stored_email: Normaliza emails em ResearcherIdentifier
+# ==============================================================================
+@celery_app.task(bind=True)
+def task_articles_complete_data(
+    self, user_id=None, username=None, from_date=None, force_update=False
+):
+    """
+    Dispara complementação de dados para todos os artigos.
+
+    Processa todos os artigos, disparando tarefas assíncronas individuais
+    para completar dados faltantes.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+        from_date (str, optional): Data inicial para filtrar artigos (não utilizado)
+        force_update (bool): Se True, força atualização mesmo se dados já existem
+
+    Returns:
+        None
+
+    Side Effects:
+        - Dispara múltiplas tarefas assíncronas article_complete_data
+        - Registra UnexpectedEvent em caso de erro
+    """
+    try:
+        user = _get_user(self.request, username, user_id)
+
+        for item in Article.objects.iterator():
+            try:
+                article_complete_data.apply_async(
+                    kwargs={
+                        "user_id": user.id,
+                        "username": user.username,
+                        "item_id": item.id,
+                    }
+                )
+            except Exception as exception:
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                UnexpectedEvent.create(
+                    exception=exception,
+                    exc_traceback=exc_traceback,
+                    detail={
+                        "task": "article.tasks.task_articles_complete_data",
+                        "item": str(item),
+                    },
+                )
+    except Exception as exception:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=exception,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.task_articles_complete_data",
+            },
+        )
+
+
+@celery_app.task(bind=True)
+def article_complete_data(
+    self, user_id=None, username=None, item_id=None, force_update=None
+):
+    """
+    Completa dados faltantes de um artigo específico.
+
+    Atualmente preenche o campo sps_pkg_name baseado no pid_v3.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+        item_id (int): ID do artigo a ser processado
+        force_update (bool, optional): Se True, força atualização (não utilizado)
+
+    Returns:
+        None
+
+    Side Effects:
+        - Atualiza campo sps_pkg_name do artigo se necessário
+    """
+    user = _get_user(self.request, username, user_id)
+    try:
+        item = Article.objects.get(pk=item_id)
+        if item.pid_v3 and not item.sps_pkg_name:
+            item.sps_pkg_name = PidProvider.get_sps_pkg_name(item.pid_v3)
+            item.save()
+    except Article.DoesNotExist:
+        pass
+
+
+@celery_app.task(bind=True)
+def transfer_license_statements_fk_to_article_license(
+    self, user_id=None, username=None
+):
+    """
+    Migra dados de licença do modelo antigo para o campo article_license.
+
+    Transfere informações de license_statements ou license para o novo
+    campo unificado article_license.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        None
+
+    Side Effects:
+        - Atualiza campo article_license de múltiplos artigos
+        - Registra atualização no log quando houver mudanças
+    """
+    user = _get_user(self.request, username, user_id)
+    articles_to_update = []
+    for instance in Article.objects.filter(article_license__isnull=True):
+
+        new_license = None
+        if (
+            instance.license_statements.exists()
+            and instance.license_statements.first().url
+        ):
+            new_license = instance.license_statements.first().url
+        elif instance.license and instance.license.license_type:
+            new_license = instance.license.license_type
+
+        if new_license:
+            instance.article_license = new_license
+            instance.updated_by = user
+            articles_to_update.append(instance)
+
+    if articles_to_update:
+        Article.objects.bulk_update(
+            articles_to_update, ["article_license", "updated_by"]
+        )
+        logging.info("The article_license of model Articles have been updated")
+
+
+@celery_app.task(bind=True)
+def normalize_stored_email(self):
+    """
+    Normaliza emails armazenados em ResearcherIdentifier.
+
+    Processa todos os identificadores de tipo EMAIL que não estão
+    normalizados, extraindo e salvando o email normalizado.
+
+    Args:
+        self: Instância da tarefa Celery
+
+    Returns:
+        None
+
+    Side Effects:
+        - Atualiza campo identifier de múltiplos ResearcherIdentifier
+        - Realiza bulk_update para otimizar performance
+    """
+    updated_list = []
+    re_identifiers = ResearcherIdentifier.get_items_with_invalid_email()
+
+    for re_identifier in re_identifiers:
+        email = extracts_normalized_email(raw_email=re_identifier.identifier)
+        if email:
+            re_identifier.identifier = email
+            updated_list.append(re_identifier)
+
+    ResearcherIdentifier.objects.bulk_update(updated_list, ["identifier"])
+
+
+# ==============================================================================
+# TAREFAS DE LIMPEZA E MANUTENÇÃO / CLEANUP AND MAINTENANCE TASKS
+# - task_mark_articles_as_deleted_without_pp_xml: Marca artigos órfãos como deletados
+# - remove_duplicate_articles_task: Remove artigos duplicados
+# ==============================================================================
+@celery_app.task(bind=True, name="task_mark_articles_as_deleted_without_pp_xml")
+def task_mark_articles_as_deleted_without_pp_xml(self, user_id=None, username=None):
+    """
+    Marca artigos como deletados quando não possuem referência PidProviderXML.
+
+    Esta tarefa identifica artigos órfãos (sem pp_xml associado) e os marca
+    com status DATA_STATUS_DELETED.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        None
+
+    Side Effects:
+        - Atualiza status de artigos sem pp_xml para DATA_STATUS_DELETED
+        - Registra quantidade de artigos atualizados no log
+        - Registra UnexpectedEvent em caso de erro
+    """
+    try:
+        user = _get_user(self.request, username, user_id)
+
+        updated_count = Article.mark_as_deleted_articles_without_pp_xml(user)
+
+        logging.info(
+            f"Task completed successfully. {updated_count} articles marked as deleted."
+        )
+
+    except Exception as exception:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=exception,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.task_mark_articles_as_deleted_without_pp_xml",
+            },
+        )
+
+        logging.error(
+            f"Error in task_mark_articles_as_deleted_without_pp_xml: {exception}"
+        )
+
+
+@celery_app.task(bind=True)
+def remove_duplicate_articles_task(self, user_id=None, username=None, pid_v3=None):
+    """
+    Tarefa Celery para remover artigos duplicados.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário (não utilizado)
+        username (str, optional): Nome do usuário (não utilizado)
+        pid_v3 (str, optional): PID v3 específico para remover duplicatas
+
+    Returns:
+        None
+
+    Side Effects:
+        - Chama remove_duplicate_articles() para executar a remoção
+    """
+    ids_to_exclude = []
+    try:
+        if pid_v3:
+            duplicates = (
+                Article.objects.filter(pid_v3=pid_v3)
+                .values("pid_v3")
+                .annotate(pid_v3_count=Count("pid_v3"))
+                .filter(pid_v3_count__gt=1, valid=False)
+            )
+        else:
+            duplicates = (
+                Article.objects.values("pid_v3")
+                .annotate(pid_v3_count=Count("pid_v3"))
+                .filter(pid_v3_count__gt=1, valid=False)
+            )
+        for duplicate in duplicates:
+            article_ids = (
+                Article.objects.filter(pid_v3=duplicate["pid_v3"])
+                .order_by("created")[1:]
+                .values_list("id", flat=True)
+            )
+            ids_to_exclude.extend(article_ids)
+
+        if ids_to_exclude:
+            Article.objects.filter(id__in=ids_to_exclude).delete()
+    except Exception as exception:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=exception,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.remove_duplicates_articles",
+            },
+        )
+
+
+# ==============================================================================
+# TAREFAS DE CONVERSÃO E FORMATAÇÃO / CONVERSION AND FORMATTING TASKS
+# - task_convert_xml_to_other_formats_for_articles: Dispara conversão em lote
+# - convert_xml_to_other_formats: Converte XML para outros formatos
+# ==============================================================================
+@celery_app.task(bind=True)
+def task_convert_xml_to_other_formats_for_articles(
+    self, user_id=None, username=None, from_date=None, force_update=False
+):
+    """
+    Dispara conversão de XML para outros formatos para todos os artigos.
+
+    Processa todos os artigos com sps_pkg_name definido, disparando
+    tarefas assíncronas individuais para conversão de formato.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+        from_date (str, optional): Data inicial para filtrar artigos (não utilizado)
+        force_update (bool): Se True, força atualização mesmo se já convertido
+
+    Returns:
+        None
+
+    Side Effects:
+        - Dispara múltiplas tarefas assíncronas convert_xml_to_other_formats
+        - Registra UnexpectedEvent em caso de erro
+    """
+    try:
+        user = _get_user(self.request, username, user_id)
+
+        for item in Article.objects.filter(sps_pkg_name__isnull=False).iterator():
+            logging.info(item.pid_v3)
+            try:
+                convert_xml_to_other_formats.apply_async(
+                    kwargs={
+                        "user_id": user.id,
+                        "username": user.username,
+                        "item_id": item.id,
+                        "force_update": force_update,
+                    }
+                )
+            except Exception as exception:
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                UnexpectedEvent.create(
+                    exception=exception,
+                    exc_traceback=exc_traceback,
+                    detail={
+                        "task": "article.tasks.task_convert_xml_to_other_formats_for_articles",
+                        "item": str(item),
+                    },
+                )
+    except Exception as exception:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=exception,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.task_convert_xml_to_other_formats_for_articles",
+            },
+        )
+
+
+@celery_app.task(bind=True)
+def convert_xml_to_other_formats(
+    self, user_id=None, username=None, item_id=None, force_update=None
+):
+    """
+    Converte XML de um artigo específico para outros formatos.
+
+    Gera formatos alternativos (PDF, HTML, etc.) a partir do XML do artigo.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+        item_id (int): ID do artigo a ser convertido
+        force_update (bool, optional): Se True, força reconversão mesmo se já existe
+
+    Returns:
+        None
+
+    Side Effects:
+        - Cria/atualiza registros ArticleFormat
+        - Registra progresso no log
+    """
+    user = _get_user(self.request, username, user_id)
+
+    try:
+        article = Article.objects.get(pk=item_id)
+    except Article.DoesNotExist:
+        logging.info(f"Not found {item_id}")
+        return
+
+    done = False
+    try:
+        article_format = ArticleFormat.objects.get(article=article)
+        done = True
+    except ArticleFormat.MultipleObjectsReturned:
+        done = True
+    except ArticleFormat.DoesNotExist:
+        done = False
+    logging.info(f"Done {done}")
+
+    if not done or force_update:
+        ArticleFormat.generate_formats(user, article=article)
+
+
+# ==============================================================================
+# TAREFAS DE EXPORTAÇÃO / EXPORT TASKS
+# - task_export_articles_to_articlemeta: Exporta artigos em lote para ArticleMeta
+# - task_export_article_to_articlemeta: Exporta um artigo para ArticleMeta
+# ==============================================================================
 @celery_app.task(bind=True, name="task_export_articles_to_articlemeta")
 def task_export_articles_to_articlemeta(
     self,
