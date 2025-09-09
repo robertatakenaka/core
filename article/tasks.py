@@ -271,12 +271,12 @@ def task_load_article_from_pid_provider(
     self,
     user_id=None,
     username=None,
-    collection_list=None,
+    collection_acron_list=None,
     journal_acron_list=None,
     from_pub_year=None,
     until_pub_year=None,
-    from_processing_date=None,
-    until_processing_date=None,
+    from_updated_date=None,
+    until_updated_date=None,
     proc_status_list=None,
 ):
     """
@@ -302,12 +302,12 @@ def task_load_article_from_pid_provider(
 
         # Busca todos os PidProviderXML com status TODO
         pp_xml_items = controller.get_pp_xml_ids_to_load_articles(
-            collection_list=collection_list,
+            collection_acron_list=collection_acron_list,
             journal_acron_list=journal_acron_list,
             from_pub_year=from_pub_year,
             until_pub_year=until_pub_year,
-            from_processing_date=from_processing_date,
-            until_processing_date=until_processing_date,
+            from_updated_date=from_updated_date,
+            until_updated_date=until_updated_date,
             proc_status_list=proc_status_list,
         )
 
@@ -413,11 +413,18 @@ def task_complete_articles_data(
     self, 
     user_id=None,
     username=None,
-    collection_list=None,
+    collection_acron_list=None,
     journal_acron_list=None,
     from_pub_year=None,
     until_pub_year=None,
     force_update=None,
+    from_updated_date=None,
+    until_updated_date=None,
+    data_status_list=None,
+    valid=None,
+    pp_xml__isnull=None,
+    sps_pkg_name__isnull=None,
+    article_license__isnull=None,
 ):
     """
     Dispara complementação de dados para todos os artigos.
@@ -441,16 +448,26 @@ def task_complete_articles_data(
     """
     try:
         user = _get_user(self.request, username, user_id)
-        journal_ids = None
-        if collection_list or journal_acron_list:
-            journal_ids = SciELOJournal.get_journal_ids(collection_list, journal_acron_list)
-        for item in Article.get_items_to_complete_data(journal_ids, from_pub_year, until_pub_year):
+        articles = Article.select_articles(
+            collection_acron_list=collection_acron_list,
+            journal_acron_list=journal_acron_list,
+            from_pub_year=from_pub_year,
+            until_pub_year=until_pub_year,
+            from_updated_date=from_updated_date,
+            until_updated_date=until_updated_date,
+            data_status_list=None,
+            valid=None,
+            pp_xml__isnull=True,
+            sps_pkg_name__isnull=True,
+            article_license__isnull=True,
+        )
+        for item_id in articles.values_list("id", flat=True):
             try:
                 task_complete_article_data.apply_async(
                     kwargs={
                         "user_id": user.id,
                         "username": user.username,
-                        "item_id": item.id,
+                        "item_id": item_id,
                         "force_update": force_update,
                     }
                 )
@@ -566,6 +583,8 @@ def task_mark_articles_as_deleted_without_pp_xml(self, user_id=None, username=No
     """
     try:
         user = _get_user(self.request, username, user_id)
+        if PidProviderXML.objects.count() == Article.objects.filter(pp_xml__isnull=False).count():
+            return
 
         updated_count = Article.mark_as_deleted_articles_without_pp_xml(user)
 
