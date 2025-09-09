@@ -301,19 +301,40 @@ def bulk_export_articles_to_articlemeta(
 
 
 def get_pp_xml_ids_to_load_articles(
-    collection_list=None,
+    collection_acron_list=None,
     journal_acron_list=None,
     from_pub_year=None,
     until_pub_year=None,
-    from_processing_date=None,
-    until_processing_date=None,
+    from_updated_date=None,
+    until_updated_date=None,
     proc_status_list=None,
 ):
-    params = {}
+    return select_pp_xml(
+        collection_acron_list,
+        journal_acron_list,
+        from_pub_year,
+        until_pub_year,
+        from_updated_date,
+        until_updated_date,
+        proc_status_list=proc_status_list or [PPXML_STATUS_TODO],
+    ).values_list("id", flat=True)
+
+
+def select_pp_xml(
+    collection_acron_list=None,
+    journal_acron_list=None,
+    from_pub_year=None,
+    until_pub_year=None,
+    from_updated_date=None,
+    until_updated_date=None,
+    proc_status_list=None,
+    params=None,
+):
+    params = params or {}
 
     q = Q()
-    if journal_acron_list or collection_list:
-        issns = SciELOJournal.get_issn_list(collection_list, journal_acron_list)
+    if journal_acron_list or collection_acron_list:
+        issns = SciELOJournal.get_issn_list(collection_acron_list, journal_acron_list)
         issn_print_list = issns["issn_print_list"]
         issn_electronic_list = issns["issn_electronic_list"]
 
@@ -324,10 +345,10 @@ def get_pp_xml_ids_to_load_articles(
         elif issn_electronic_list:
             q = Q(issn_electronic__in=issn_electronic_list)
 
-    if from_processing_date:
-        params["updated__gte"] = from_processing_date
-    if until_processing_date:
-        params["updated__lte"] = until_processing_date
+    if from_updated_date:
+        params["updated__gte"] = from_updated_date
+    if until_updated_date:
+        params["updated__lte"] = until_updated_date
 
     if from_pub_year:
         params["pub_year__gte"] = from_pub_year
@@ -336,7 +357,5 @@ def get_pp_xml_ids_to_load_articles(
 
     if proc_status_list:
         params["proc_status__in"] = proc_status_list
-    else:
-        params["proc_status__in"] = [PPXML_STATUS_TODO]
 
-    return PidProviderXML.objects.filter(q, **params).values_list("id", flat=True)
+    return PidProviderXML.objects.filter(q, **params)
