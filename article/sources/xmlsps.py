@@ -210,13 +210,9 @@ def load_article(user, xml=None, file_path=None, v3=None, pp_xml=None):
         article.errors = errors
         article.save()  # Salvar estado final
 
-        if (
-            article.valid
-            and article.pp_xml
-            and article.pp_xml.proc_status != PPXML_STATUS_DONE
-        ):
-            article.pp_xml.proc_status = PPXML_STATUS_DONE
-            article.pp_xml.save()
+        if article.pp_xml is pp_xml and article.pp_xml.proc_status != PPXML_STATUS_DONE:
+            pp_xml.proc_status = PPXML_STATUS_DONE
+            pp_xml.save()
 
         logging.info(
             f"The article {pid_v3} has been processed with {len(errors)} errors"
