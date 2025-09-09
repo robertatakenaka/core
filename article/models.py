@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 from datetime import datetime
+from functools import lru_cache
 
 from django.core.files.base import ContentFile
 from django.db import IntegrityError, models
@@ -29,12 +30,13 @@ from core.models import (
     LicenseStatement,
     TextLanguageMixin,
 )
+from core.utils.utils import fetch_data, NonRetryableError
 from doi.models import DOI
 from doi_manager.models import CrossRefConfiguration
 from institution.models import Publisher, Sponsor
 from issue.models import Issue, TocSection
 from journal.models import Journal, SciELOJournal
-from pid_provider.choices import PPXML_STATUS_DONE
+from pid_provider.choices import PPXML_STATUS_DONE, PPXML_STATUS_TODO
 from pid_provider.models import PidProviderXML
 from pid_provider.provider import PidProvider
 from researcher.models import InstitutionalAuthor, Researcher
@@ -99,7 +101,7 @@ class Article(
     researchers = models.ManyToManyField(Researcher, blank=True)
     collab = models.ManyToManyField(InstitutionalAuthor, blank=True)
     article_type = models.CharField(max_length=50, null=True, blank=True)
-    # abstracts = models.ManyToManyField("DocumentAbstract", blank=True)
+    # abstracts = InlinePanel
     toc_sections = models.ManyToManyField(TocSection, blank=True)
     license_statements = models.ManyToManyField(LicenseStatement, blank=True)
     license = models.ForeignKey(
@@ -113,6 +115,7 @@ class Article(
     valid = models.BooleanField(default=False, blank=True, null=True)
     errors = models.JSONField(default=None, blank=True, null=True)
 
+    base_form_class = CoreAdminModelForm
     panels_ids = [
         FieldPanel("data_status"),
         FieldPanel("valid"),
@@ -197,8 +200,19 @@ class Article(
         return self.sps_pkg_name or self.pid_v3 or f"{self.doi.first()}" or self.title
 
     @property
+    @lru_cache(maxsize=1)
+    def xml_with_pre(self):
+        try:
+            return self.pp_xml.xml_with_pre
+        except AttributeError:
+            return PidProviderXML.get_xml_with_pre(self.pid_v3)
+
+    @property
     def xmltree(self):
-        return PidProvider.get_xmltree(self.pid_v3)
+        try:
+            return self.xml_with_pre.xmltree
+        except AttributeError:
+            return PidProvider.get_xmltree(self.pid_v3)
 
     @property
     def abstracts(self):
@@ -211,9 +225,6 @@ class Article(
                 "collection"
             ):
                 yield item.collection
-        # scielo_journals = SciELOJournal.objects.select_related("collection").filter(journal=self.journal)
-        # for scielo_journal in scielo_journals:
-        #     yield scielo_journal.collection
 
     @classmethod
     def last_created_date(cls):
@@ -318,6 +329,10 @@ class Article(
             int: Número de artigos atualizados
         """
         try:
+            if PidProviderXML.objects.filter(proc_status=PPXML_STATUS_TODO).exists():
+                # não pode apagar Article porque há PidProviderXML para associar com Article
+                return
+
             return (
                 cls.objects.filter(pp_xml__isnull=True)
                 .exclude(data_status=choices.DATA_STATUS_DELETED)
@@ -336,23 +351,6 @@ class Article(
                 action="article.models.Article.mark_articles_as_deleted_without_pp_xml",
                 detail=None,
             )
-
-    @classmethod
-    def get_items_to_complete_data(cls, journal_ids=None, from_pub_year=None, until_pub_year=None):
-        params = {}
-        if journal_ids:
-            params["journal__pk"] = journal_ids
-        if from_pub_year:
-            params["pub_date_year__gte"] = from_pub_year
-        if until_pub_year:
-            params["pub_date_year__lte"] = until_pub_year
-
-        return cls.objects.filter(
-            Q(sps_pkg_name__isnull=True) |
-            Q(pp_xml__isnull=True) |
-            Q(article_license__isnull=True),
-            **params,
-        )
 
     def complete_data(self, pp_xml):
         save = False
@@ -392,6 +390,101 @@ class Article(
     def is_indexed_at(self, db_acronym):
         return bool(self.journal) and self.journal.is_indexed_at(db_acronym)
 
+    @classmethod
+    def select_journals(cls, collection_acron_list=None, journal_acron_list=None):
+        params = {}
+        if collection_acron_list:
+            params["collection__acron__in"] = collection_acron_list
+        if journal_acron_list:
+            params["journal_acron__in"] = journal_acron_list
+        return SciELOJournal.objects.filter(**params)
+
+    @classmethod
+    def select_articles(
+        cls,
+        collection_acron_list=None,
+        journal_acron_list=None,
+        from_pub_year=None,
+        until_pub_year=None,
+        from_updated_date=None,
+        until_updated_date=None,
+        data_status_list=None,
+        valid=None,
+        pp_xml__isnull=None,
+        sps_pkg_name__isnull=None,
+        article_license__isnull=None,
+    ):
+        params = {}
+        if collection_acron_list:
+            params["journal__scielojournal_set__collection__acron__in"] = collection_acron_list
+        if journal_acron_list:
+            params["journal__scielojournal_set__journal_acron__in"] = journal_acron_list
+
+        if from_pub_year:
+            params["issue__year__gte"] = from_pub_year
+        if until_pub_year:
+            params["issue__year__lte"] = until_pub_year
+
+        if from_updated_date:
+            params["updated_date__gte"] = from_updated_date
+        if until_updated_date:
+            params["updated_date__lte"] = until_updated_date
+
+        if data_status_list:
+            params["data_status__in"] = data_status_list
+
+        q = Q()
+        if valid is not None:
+            q |= Q(valid=valid) 
+        if pp_xml__isnull is not None:
+            q |= Q(pp_xml__isnull=pp_xml__isnull) 
+        if sps_pkg_name__isnull is not None:
+            q |= Q(sps_pkg_name__isnull=sps_pkg_name__isnull) 
+        if article_license__isnull is not None:
+            q |= Q(article_license__isnull=article_license__isnull) 
+        return cls.objects.filter(q, **params)
+
+    def selected_collections(self, collection_acron_list=None):
+        if collection_acron_list:
+            scielojournals = self.journal.scielojournal_set.filter(collection_acron__in=collection_acron_list)
+        else:
+            scielojournals = self.journal.scielojournal_set.all()
+        for item in scielojournals:
+            yield item.collection
+
+    def get_article_urls(self, website_url):
+        journal_acron = self.journal.journal_acron
+        pid_v2 = self.pid_v2
+        pid_v3 = self.pid_v3
+
+        yield {"url": f"{website_url}/j/{journal_acron}/a/{pid_v3}/?format=xml", "format": "xml"}
+
+        for lang in self.xml_with_pre.langs:
+            yield {"url": f"{website_url}/j/{journal_acron}/a/{pid_v3}/?lang={lang}", "format": "html"}
+            yield {"url": f"{website_url}/scielo.php?script=sci_arttext&pid={pid_v2}&tlng={lang}", "format": "html"}
+            yield {"url": f"{website_url}/j/{journal_acron}/a/{pid_v3}/?lang={lang}&format=pdf", "format": "pdf"}
+            yield {"url": f"{website_url}/scielo.php?script=sci_pdf&pid={pid_v2}&tlng={lang}", "format": "pdf"}
+
+    def check_availability(self, user, collection_acron_list=None, timeout=None):
+        for collection in self.selected_collections(collection_acron_list):
+            for item in self.get_article_urls(collection.domain):
+                self.article_webpage.add(
+                    ArticleWebpage.create_or_update(
+                        user,
+                        self,
+                        collection=collection,
+                        url=item["url"],
+                        fmt=item["format"],
+                        timeout=timeout,
+                    )
+                )
+
+    def is_available(self, collection_acron_list, fmt="xml"):
+        return self.article_webpage.filter(
+            available=True, fmt=fmt, collection_acron__in=collection_acron_list,
+        ).exists()
+
+
     # @property
     # def get_abstracts_order_by_lang_pt(self):
     #     return self.abstracts.all().order_by(
@@ -401,8 +494,6 @@ class Article(
     #                 output_field=models.IntegerField()
     #             )
     #         )
-
-    base_form_class = CoreAdminModelForm
 
 
 class ArticleFunding(CommonControlField):
@@ -1145,14 +1236,13 @@ class ArticleSource(CommonControlField):
         return obj
 
     @property
+    @lru_cache(maxsize=1)
     def sps_pkg_name(self):
-        if not hasattr(self, "_sps_pkg_name") or not self._sps_pkg_name:
-            try:
-                xml_with_pre = list(XMLWithPre.create(path=self.file.path))[0]
-            except:
-                xml_with_pre = list(XMLWithPre.create(uri=self.url))[0]
-            self._sps_pkg_name = xml_with_pre.sps_pkg_name
-        return self._sps_pkg_name
+        try:
+            xml_with_pre = list(XMLWithPre.create(path=self.file.path))[0]
+        except:
+            xml_with_pre = list(XMLWithPre.create(uri=self.url))[0]
+        return xml_with_pre.sps_pkg_name
 
     def create_file(self):
         logging.info(f"ArticleSource.create_file for {self.url}")
@@ -1450,3 +1540,85 @@ class ArticleExport(CommonControlField):
             export_type=export_type,
             collection=collection
         ).exists()
+
+
+class ArticleWebpage(CommonControlField):
+    article = ParentalKey(
+        Article,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="article_webpage",
+    )
+    url = models.URLField(max_length=500, unique=True)
+    available = models.BooleanField(default=False)
+    fmt = models.CharField(_("Format"), max_length=4, null=True, blank=True)
+
+    panels = [FieldPanel("url"), FieldPanel("available", read_only=True)]
+
+    @classmethod
+    def get(cls, article, url):
+        return cls.objects.get(article=article, url=url)
+
+    @classmethod
+    def create(
+        cls,
+        user,
+        article,
+        collection,
+        url,
+        fmt,
+        timeout=None,
+    ):
+        try:
+            obj = cls(
+                article=article,
+                collection=collection,
+                url=url,
+                fmt=fmt,
+                available=check_url(url, timeout),
+                creator=user,
+            )
+            obj.save()
+            return obj
+        except IntegrityError:
+            return cls.get(article, url)
+
+    @classmethod
+    def create_or_update(
+        cls,
+        user,
+        article,
+        collection,
+        url,
+        fmt,
+        timeout=None,
+    ):
+        try:
+            obj = cls.get(article=article, url=url)
+            obj.fmt = fmt
+            obj.update(user, timeout)
+            return obj
+        except cls.DoesNotExist:
+            return cls.create(
+                user=user,
+                article=article,
+                collection=collection,
+                url=url,
+                fmt=fmt,
+                timeout=timeout,
+            )
+
+    def update(self, user, timeout=None):
+        self.available = check_url(self.url, timeout)
+        self.updated_by = user
+        self.save()
+
+
+def check_url(url, timeout=None):
+    try:
+        fetch_data(url, timeout=timeout or 30)
+    except NonRetryableError as e:
+        return False
+    else:
+        return True
