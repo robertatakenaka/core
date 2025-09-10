@@ -21,6 +21,7 @@ from wagtail.models import Orderable
 from wagtailautocomplete.edit_handlers import AutocompletePanel
 
 from article import choices
+from article.url_builder import ArticleURLBuilder
 from core.forms import CoreAdminModelForm
 from core.models import CommonControlField  # Ajuste o import conforme sua estrutura
 from core.models import (
@@ -224,7 +225,8 @@ class Article(
             for item in self.journal.scielojournal_set.all().select_related(
                 "collection"
             ):
-                yield item.collection
+                if item.is_active:
+                    yield item.collection
 
     @classmethod
     def last_created_date(cls):
@@ -445,25 +447,34 @@ class Article(
         return cls.objects.filter(q, **params)
 
     def selected_collections(self, collection_acron_list=None):
+        params = {}
         if collection_acron_list:
-            scielojournals = self.journal.scielojournal_set.filter(collection_acron__in=collection_acron_list)
-        else:
-            scielojournals = self.journal.scielojournal_set.all()
-        for item in scielojournals:
+            params["collection__acron__in"] = collection_acron_list
+
+        for item in self.journal.scielojournal_set.filter(is_active=True, **params):
             yield item.collection
 
+    @property
+    @lru_cache(maxsize=1)
+    def article_url_builder(self):
+        return ArticleURLBuilder(website_url, self.journal.journal_acron)
+    
+    @property
+    @lru_cache(maxsize=1)
+    def langs(self):
+        return [lang.code2 for lang in self.languages]
+
     def get_article_urls(self, website_url):
-        journal_acron = self.journal.journal_acron
-        pid_v2 = self.pid_v2
-        pid_v3 = self.pid_v3
+        return list(self.article_url_builder.get_urls(self.pid_v2, self.pid_v3, self.langs))
 
-        yield {"url": f"{website_url}/j/{journal_acron}/a/{pid_v3}/?format=xml", "format": "xml"}
+    def get_xml_url(self, website_url):
+        return self.article_url_builder.get_xml_url(self.pid_v3)
 
-        for lang in self.xml_with_pre.langs:
-            yield {"url": f"{website_url}/j/{journal_acron}/a/{pid_v3}/?lang={lang}", "format": "html"}
-            yield {"url": f"{website_url}/scielo.php?script=sci_arttext&pid={pid_v2}&tlng={lang}", "format": "html"}
-            yield {"url": f"{website_url}/j/{journal_acron}/a/{pid_v3}/?lang={lang}&format=pdf", "format": "pdf"}
-            yield {"url": f"{website_url}/scielo.php?script=sci_pdf&pid={pid_v2}&tlng={lang}", "format": "pdf"}
+    def get_rendition_urls(self, website_url):
+        return list(self.article_url_builder.pdf_urls(self.pid_v2, self.pid_v3, self.langs))
+
+    def get_html_urls(self, website_url):
+        return list(self.article_url_builder.html_urls(self.pid_v2, self.pid_v3, self.langs))
 
     def check_availability(self, user, collection_acron_list=None, timeout=None):
         for collection in self.selected_collections(collection_acron_list):
@@ -475,15 +486,21 @@ class Article(
                         collection=collection,
                         url=item["url"],
                         fmt=item["format"],
+                        lang=item["lang"],
                         timeout=timeout,
                     )
                 )
+    def get_available(self, fmt, collection_acron_list=None):
+        params = {}
+        if collection_acron_list:
+            params["collection__acron__in"] = collection_acron_list
+        if fmt:
+            params["fmt"] = fmt
+        return [item.data for item in self.article_webpage.filter(available=True, **params)]
 
-    def is_available(self, collection_acron_list, fmt="xml"):
-        return self.article_webpage.filter(
-            available=True, fmt=fmt, collection_acron__in=collection_acron_list,
-        ).exists()
-
+    def is_available(self, collection_acron_list=None, fmt=None):
+        for item in self.get_available(self, fmt, collection_acron_list):
+            return True
 
     # @property
     # def get_abstracts_order_by_lang_pt(self):
@@ -1568,6 +1585,7 @@ class ArticleWebpage(CommonControlField):
         collection,
         url,
         fmt,
+        lang,
         timeout=None,
     ):
         try:
@@ -1576,6 +1594,7 @@ class ArticleWebpage(CommonControlField):
                 collection=collection,
                 url=url,
                 fmt=fmt,
+                lang=lang,
                 available=check_url(url, timeout),
                 creator=user,
             )
@@ -1592,11 +1611,14 @@ class ArticleWebpage(CommonControlField):
         collection,
         url,
         fmt,
+        lang,
         timeout=None,
     ):
         try:
             obj = cls.get(article=article, url=url)
             obj.fmt = fmt
+            obj.lang = lang
+            obj.collection = collection
             obj.update(user, timeout)
             return obj
         except cls.DoesNotExist:
@@ -1606,6 +1628,7 @@ class ArticleWebpage(CommonControlField):
                 collection=collection,
                 url=url,
                 fmt=fmt,
+                lang=lang,
                 timeout=timeout,
             )
 
@@ -1613,6 +1636,14 @@ class ArticleWebpage(CommonControlField):
         self.available = check_url(self.url, timeout)
         self.updated_by = user
         self.save()
+
+    @property
+    def data(self):
+        return {
+            "format": self.fmt,
+            "lang": self.lang,
+            "url": self.url,
+        }
 
 
 def check_url(url, timeout=None):
