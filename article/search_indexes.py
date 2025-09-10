@@ -33,7 +33,7 @@ class ArticleIndex(indexes.SearchIndex, indexes.Indexable):
     type = indexes.CharField(model_attr="article_type", null=True)
     pid = indexes.CharField(model_attr="pid_v2", null=True)
     pid_v3 = indexes.CharField(model_attr="pid_v3", null=True)
-    publication_year = indexes.CharField(model_attr="pub_date_year", null=True)
+    publication_year = indexes.CharField(null=True)
     domain = indexes.CharField(null=True)
     issue = indexes.CharField(null=True)
     volume = indexes.CharField(null=True)
@@ -73,32 +73,14 @@ class ArticleIndex(indexes.SearchIndex, indexes.Indexable):
         if obj.journal:
             collections = obj.collections
             # prepara the fulltext_pdf_*
-            # FIXME
             # Article languages nao tem a mesma correpondencia de languages PDF
-            for collection in collections:
-                for lang in obj.languages.all():
-                    data["fulltext_pdf_%s" % (lang.code2)] = (
-                        "http://%s/scielo.php?script=sci_pdf&pid=%s&tlng=%s"
-                        % (
-                            collection.domain,
-                            obj.pid_v2,
-                            lang.code2,
-                        )
-                    )
+            for item in obj.get_available("pdf"):
+                data["fulltext_pdf_%s" % (item["lang"])] = item["url"]
 
             # prepara the fulltext_html_*
-            # FIXME
             # Article languages nao tem a mesma correpondencia de languages HTML
-            for collection in collections:
-                for lang in obj.languages.all():
-                    data["fulltext_html_%s" % (lang.code2)] = (
-                        "http://%s/scielo.php?script=sci_arttext&pid=%s&tlng=%s"
-                        % (
-                            collection.domain,
-                            obj.pid_v2,
-                            lang.code2,
-                        )
-                    )
+            for item in obj.get_available("html"):
+                data["fulltext_html_%s" % (item["lang"])] = item["url"]
 
         return data
 
@@ -125,16 +107,9 @@ class ArticleIndex(indexes.SearchIndex, indexes.Indexable):
         """
         This field is a URLs for all collection of this article.
         """
-        collections = obj.collections
         urls = []
-
-        if obj.journal:
-            for collection in collections:
-                urls.append(
-                    "http://%s/scielo.php?script=sci_arttext&pid=%s"
-                    % (collection.domain, obj.pid_v2)
-                )
-
+        for fmt in ("html", "pdf"):
+            urls.extend(list(item["url"] for item in obj.get_available(fmt=fmt)))
         return urls
 
     def prepare_journal_title(self, obj):
@@ -158,22 +133,21 @@ class ArticleIndex(indexes.SearchIndex, indexes.Indexable):
             )
             return [sci_journal.journal_acron for sci_journal in sci_journals]
 
+    def prepare_publication_year(self, obj):
+        return obj.issue.year
+
     def prepare_year_cluster(self, obj):
-        return str(obj.pub_date_year)
+        return obj.issue.year
 
     def prepare_collection(self, obj):
-        collections = obj.collections
-        return (
-            [collection.acron3 for collection in collections] if obj.journal else None
-        )
+        return [collection.acron3 for collection in obj.collections]
 
     def prepare_doi(self, obj):
         if obj.doi:
             return [doi.value for doi in obj.doi.all()]
 
     def prepare_la(self, obj):
-        if obj.languages:
-            return [language.code2 for language in obj.languages.all()]
+        return obj.langs
 
     def prepare_titles(self, obj):
         if obj.titles:
@@ -189,7 +163,7 @@ class ArticleIndex(indexes.SearchIndex, indexes.Indexable):
 
     def prepare_collab(self, obj):
         if obj.collab:
-            return [collab.institution_author for collab in obj.collab.all()]
+            return [collab.collab for collab in obj.collab.all()]
 
     def prepare_au(self, obj):
         if obj.researchers:
@@ -220,9 +194,8 @@ class ArticleIndex(indexes.SearchIndex, indexes.Indexable):
             return [abstract.plain_text for abstract in obj.abstracts.all()]
 
     def prepare_domain(self, obj):
-        collections = obj.collections
         try:
-            return collections.all()[0].domain
+            return obj.journal.main_collection.domain
         except AttributeError:
             pass
 
@@ -236,7 +209,7 @@ class ArticleIndex(indexes.SearchIndex, indexes.Indexable):
         return Article
 
     def index_queryset(self, using=None):
-        return self.get_model().objects.all()
+        return self.get_model().objects.filter(data_status="PUBLIC")
 
 
 class ArticleOAIIndex(indexes.SearchIndex, indexes.Indexable):
@@ -334,13 +307,13 @@ class ArticleOAIIndex(indexes.SearchIndex, indexes.Indexable):
         """This is a soft delete on the index, so in the application which handle
         the data must flag as deleted to the index, by now we are set as ``False``
         """
-        return False
+        return obj.data_status == "DELETED"
 
     def prepare_public(self, obj):
         """Until now we dont have a field on data set as public,
         by now we are set as ``False``
         """
-        return True
+        return obj.data_status == "PUBLIC"
 
     def prepare_collections(self, obj):
         """The ISSN is on SciELO Journal models.SciELOJournal.objects.filter(journal=j)[0].issn_scielo"""
@@ -356,8 +329,7 @@ class ArticleOAIIndex(indexes.SearchIndex, indexes.Indexable):
         can return no record that is very weak.
         """
         if obj.collections:
-            if obj.collections:
-                return ["com_%s" % col for col in obj.collections]
+            return ["com_%s" % col.main_name for col in obj.collections]
 
     def prepare_titles(self, obj):
         """The list of titles."""
@@ -408,8 +380,7 @@ class ArticleOAIIndex(indexes.SearchIndex, indexes.Indexable):
 
     def prepare_la(self, obj):
         """The language of the article."""
-        if obj.languages:
-            return set([language.code2 for language in obj.languages.all()])
+        return obj.langs
 
     def prepare_identifier(self, obj):
         """Add the all identifier to the article:
@@ -421,18 +392,8 @@ class ArticleOAIIndex(indexes.SearchIndex, indexes.Indexable):
         """
         idents = set()
 
-        if obj.journal:
-            collections = obj.collections
-            for collection in collections:
-                for lang in obj.languages.all():
-                    idents.add(
-                        "http://%s/scielo.php?script=sci_arttext&pid=%s&tlng=%s"
-                        % (
-                            collection.domain,
-                            obj.pid_v2,
-                            lang.code2,
-                        )
-                    )
+        idents.update([item["url"] for item in obj.get_available("html")])
+        idents.update([item["url"] for item in obj.get_available("pdf")])
 
         if obj.doi:
             idents.update([doi.value for doi in obj.doi.all()])
@@ -461,4 +422,4 @@ class ArticleOAIIndex(indexes.SearchIndex, indexes.Indexable):
         return Article
 
     def index_queryset(self, using=None):
-        return self.get_model().objects.all()
+        return self.get_model().objects.filter(data_status__in=["PUBLIC", "DELETED"])
