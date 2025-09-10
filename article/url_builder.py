@@ -50,10 +50,10 @@ class ArticleURLBuilder:
     def get_urls(self, pid_v2, pid_v3, languages=None):
         yield {"format": "xml", "url": self.xml_url(pid_v3)}
 
-       for item in self.html_urls(pid_v2, pid_v3, languages):
+        for item in self.html_urls(pid_v2, pid_v3, languages):
             item["format"] = "html"
             yield item
 
-       for item in self.pdf_urls(pid_v2, pid_v3, languages):
+        for item in self.pdf_urls(pid_v2, pid_v3, languages):
             item["format"] = "pdf"
             yield item
