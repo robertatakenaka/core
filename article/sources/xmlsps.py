@@ -205,7 +205,10 @@ def load_article(user, xml=None, file_path=None, v3=None, pp_xml=None):
         # FINALIZAÇÃO
         article.valid = not errors
         if article.valid:
-            article.data_status = choices.DATA_STATUS_PUBLIC
+            
+            article.check_availability(user)
+            if article.is_available():
+                article.data_status = choices.DATA_STATUS_PUBLIC
 
         article.errors = errors
         article.save()  # Salvar estado final
