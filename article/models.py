@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import traceback
 from datetime import datetime
 from functools import lru_cache
 
@@ -9,8 +10,8 @@ from django.db import IntegrityError, models
 from django.db.models import Q
 from django.db.utils import DataError
 from django.utils.translation import gettext_lazy as _
-from django.utils.translation import gettext_lazy as _
 from django_prometheus.models import ExportModelOperationsMixin
+from django.utils import timezone
 from legendarium.formatter import descriptive_format
 from modelcluster.fields import ParentalKey
 from modelcluster.models import ClusterableModel
@@ -43,6 +44,10 @@ from pid_provider.provider import PidProvider
 from researcher.models import InstitutionalAuthor, Researcher
 from tracker.models import UnexpectedEvent
 from vocabulary.models import Keyword
+
+
+class EventCreatorError(Exception):
+    ...
 
 
 class Article(
@@ -149,10 +154,14 @@ class Article(
     panels_institutions = [
         AutocompletePanel("fundings", read_only=True),
     ]
+    panels_events = [
+        InlinePanel("events", label=_("Event"), heading=_("Article Events")),
+    ]
 
     edit_handler = TabbedInterface(
         [
             ObjectList(panels_ids, heading=_("Identification")),
+            ObjectList(panels_events, heading=_("Events")),
             ObjectList(panels_languages, heading=_("Data with language")),
             ObjectList(panels_researchers, heading=_("Researchers")),
             ObjectList(panels_institutions, heading=_("Publisher and Sponsors")),
@@ -285,39 +294,89 @@ class Article(
             return year
 
     @classmethod
+    def get_versions(
+        cls,
+        pid_v3=None,
+        doi=None,
+        sps_pkg_name=None,
+    ):
+        if not pid_v3 and not doi and not sps_pkg_name:
+            raise ValueError("Article requires params: pid_v3 or doi or sps_pkg_name")
+        q = Q()
+        if doi:
+            q |= Q(doi__value__iexact=doi)
+        if sps_pkg_name:
+            q |= Q(sps_pkg_name=sps_pkg_name)
+        if pid_v3:
+            q |= Q(pid_v3=pid_v3)
+        selected = cls.objects.filter(
+            q
+        ).exclude(
+            data_status=choices.DATA_STATUS_DELETED,
+        ).order_by("-updated")
+
+    @classmethod
     def get(
         cls,
-        pid_v3,
+        pid_v3=None,
+        doi=None,
+        sps_pkg_name=None,
     ):
-        if pid_v3:
-            return cls.objects.get(pid_v3=pid_v3)
-        raise ValueError("Article requires pid_v3")
+        if not pid_v3 and not doi and not sps_pkg_name:
+            raise ValueError("Article requires params: pid_v3 or doi or sps_pkg_name")
+
+        versions = cls.get_versions(pid_v3=pid_v3, doi=doi, sps_pkg_name=sps_pkg_name)
+        total = versions.count()
+        if total == 0:
+            raise cls.DoesNotExist
+        if total == 1:
+            return versions.first()
+        raise cls.MultipleObjectsReturned(f"Found {total} Article {pid_v3} {doi} {sps_pkg_name}")
 
     @classmethod
     def create(
         cls,
-        pid_v3,
         user,
+        pid_v3=None,
+        doi=None,
+        sps_pkg_name=None,
     ):
         try:
             obj = cls()
             obj.pid_v3 = pid_v3
+            obj.sps_pkg_name = sps_pkg_name
             obj.creator = user
             obj.save()
+            if doi:
+                obj.doi.add(DOI.create_or_update(user, doi, None))
             return obj
         except IntegrityError:
-            return cls.get(pid_v3=pid_v3)
+            return cls.get(pid_v3=pid_v3, doi=doi, sps_pkg_name=sps_pkg_name)
+
+    @classmethod
+    def create_or_update(
+        cls,
+        user,
+        pid_v3=None,
+        doi=None,
+        sps_pkg_name=None,
+    ):
+        try:
+            return cls.get(doi=doi, pid_v3=pid_v3, sps_pkg_name=sps_pkg_name)
+        except cls.DoesNotExist:
+            return cls.create(user=user, pid_v3=pid_v3, doi=doi, sps_pkg_name=sps_pkg_name)
+        except cls.MultipleObjectsReturned:
+            return cls.get_versions(pid_v3=pid_v3, doi=doi, sps_pkg_name=sps_pkg_name).first()
 
     @classmethod
     def get_or_create(
         cls,
-        pid_v3,
-        user,
+        pid_v3=None,
+        user=None,
+        doi=None,
+        sps_pkg_name=None,
     ):
-        try:
-            return cls.get(pid_v3=pid_v3)
-        except cls.DoesNotExist:
-            return cls.create(pid_v3=pid_v3, user=user)
+        return cls.create_or_update(user=user, pid_v3=pid_v3, doi=doi, sps_pkg_name=sps_pkg_name)
 
     @classmethod
     def mark_as_deleted_articles_without_pp_xml(cls, user):
@@ -477,10 +536,12 @@ class Article(
         return list(self.article_url_builder.html_urls(self.pid_v2, self.pid_v3, self.langs))
 
     def check_availability(self, user, collection_acron_list=None, timeout=None):
-        for collection in self.selected_collections(collection_acron_list):
-            for item in self.get_article_urls(collection.domain):
-                self.article_webpage.add(
-                    ArticleWebpage.create_or_update(
+        try:
+            event = None
+            event = article.add_event(user, _("check availability"))
+            for collection in self.selected_collections(collection_acron_list):
+                for item in self.get_article_urls(collection.domain):
+                    ArticleAvailability.create_or_update(
                         user,
                         self,
                         collection=collection,
@@ -489,28 +550,79 @@ class Article(
                         lang=item["lang"],
                         timeout=timeout,
                     )
-                )
+            event.finish(user, completed=article.is_available, detail=ArticleAvailability.get_stats(self))
+        except Exception as e:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            if event:
+                event.finish(user, completed=False, exceptions=traceback.format_exc())
+
+            UnexpectedEvent.create(
+                item=str(self),
+                exception=e,
+                exc_traceback=exc_traceback,
+                detail=dict(
+                    function="article.models.Article.check_availability",
+                ),
+            )
+
     def get_available(self, fmt, collection_acron_list=None):
         params = {}
         if collection_acron_list:
             params["collection__acron__in"] = collection_acron_list
         if fmt:
             params["fmt"] = fmt
-        return [item.data for item in self.article_webpage.filter(available=True, **params)]
+
+        for item in self.article_availability.filter(available=True, **params):
+            yield item.data
 
     def is_available(self, collection_acron_list=None, fmt=None):
+        if not fmt and not collection_acron_list:
+            return self.article_availability.filter(available=True).exists()
         for item in self.get_available(self, fmt, collection_acron_list):
             return True
 
-    # @property
-    # def get_abstracts_order_by_lang_pt(self):
-    #     return self.abstracts.all().order_by(
-    #             Case(
-    #                 When(language__code2='pt', then=0),
-    #                 default=1,
-    #                 output_field=models.IntegerField()
-    #             )
-    #         )
+    def add_event(self, user, name):
+        return ArticleEvent.create(user, self, name)
+
+    def remove_duplications(self, user):
+        try:
+            event = None
+            event = self.add_event(user, _("remove duplication"))
+
+            doi__values = [item.value for item in self.doi.all()]
+            selected = Article.objects.filter(
+                Q(pid_v3=self.pid_v3),
+                Q(sps_pkg_name=self.sps_pkg_name),
+                Q(doi__in=doi__values),
+            ).exclude(
+                data_status=choices.DATA_STATUS_DELETED,
+            ).order_by("-updated")
+            latest = selected.first()
+
+            if selected.count() <= 1:
+                event.finish(user, completed=True, detail={"duplicated": 0})
+                return
+
+            article_ids = list(selected.values_list("id", flat=True)[1:])
+            updated = Article.objects.filter(id__in=article_ids).update(
+                data_status=choices.DATA_STATUS_DELETED,
+                updated_by=user,
+                updated=timezone.now()
+            )
+            event.finish(user, completed=True, detail={"duplicated": len(article_ids), "updated": updated})
+        except Exception as e:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            if event:
+                event.finish(user, exceptions=traceback.format_exc())
+
+            UnexpectedEvent.create(
+                item=str(self),
+                exception=e,
+                exc_traceback=exc_traceback,
+                detail=dict(
+                    function="article.models.Article.remove_duplications",
+                ),
+            )
 
 
 class ArticleFunding(CommonControlField):
@@ -1559,13 +1671,13 @@ class ArticleExport(CommonControlField):
         ).exists()
 
 
-class ArticleWebpage(CommonControlField):
+class ArticleAvailability(CommonControlField):
     article = ParentalKey(
         Article,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="article_webpage",
+        related_name="article_availability",
     )
     url = models.URLField(max_length=500, unique=True)
     available = models.BooleanField(default=False)
@@ -1643,6 +1755,49 @@ class ArticleWebpage(CommonControlField):
             "format": self.fmt,
             "lang": self.lang,
             "url": self.url,
+            "available": self.available,
+            "last_checked": item.updated.isoformat() if item.updated else None,
+        }
+
+    @classmethod
+    def get_stats(cls, article, **filters):
+        """
+        Retorna relatório com total, total indisponível e dados dos itens indisponíveis.
+        
+        Args:
+            article: Instância do Article ou ID do artigo (opcional)
+            **filters: Filtros adicionais do Django ORM
+        
+        Returns:
+            dict: Relatório de indisponibilidade com dados completos
+        """
+        # Construir queryset base
+        
+        # Filtrar por artigo se fornecido
+        if isinstance(article, int):
+            queryset = queryset.filter(article_id=article)
+        else:
+            queryset = queryset.filter(article=article)
+        
+        # Aplicar filtros adicionais
+        if filters:
+            queryset = queryset.filter(**filters)
+        
+        # Contar totais
+        total = queryset.count()
+        unavailable_queryset = queryset.filter(available=False)
+        total_unavailable = unavailable_queryset.count()
+        
+        # Obter dados completos dos itens indisponíveis
+        unavailable_items = []
+        for item in queryset.filter(available=False):
+            unavailable_items.append(item.data)
+        
+        return {
+            "total": total,
+            "total_available": total - total_unavailable,
+            "availability_rate": round(((total - total_unavailable) / total * 100), 2) if total > 0 else 0,
+            "unavailable_items": unavailable_items,
         }
 
 
@@ -1653,3 +1808,173 @@ def check_url(url, timeout=None):
         return False
     else:
         return True
+
+
+# Adicione este código ao arquivo article/models.py
+
+class ArticleEvent(BaseEvent, CommonControlField, Orderable):
+    """
+    Registra eventos relacionados a um artigo específico.
+    Herda de BaseEvent (name, detail, created) e CommonControlField (creator, updated_by, etc)
+    """
+    
+    article = ParentalKey(
+        Article,
+        on_delete=models.CASCADE,
+        related_name="events",
+        verbose_name=_("Article")
+    )
+    completed = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-created", "-id"]  # Mais recente primeiro
+        indexes = [
+            models.Index(fields=["article", "-created"]),
+            models.Index(fields=["name"]),
+            models.Index(fields=["created"]),
+        ]
+        verbose_name = _("Article Event")
+        verbose_name_plural = _("Article Events")
+    
+    panels = [
+        FieldPanel("name"),
+        FieldPanel("detail"),
+        FieldPanel("created", read_only=True),
+    ]
+    
+    def __str__(self):
+        return f"{self.name} - {self.created.strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    @classmethod
+    def get(cls, article, name, created=None):
+        """
+        Busca um evento específico do artigo.
+        
+        Args:
+            article: Instância do Article
+            name: Nome do evento
+            created: Data de criação (opcional)
+        
+        Returns:
+            ArticleEvent instance
+        
+        Raises:
+            ArticleEvent.DoesNotExist
+        """
+        filters = {"article": article, "name": name}
+        if created:
+            filters["created"] = created
+        
+        return cls.objects.get(**filters)
+    
+    @classmethod
+    def create(cls, user, article, name):
+        """
+        Cria um novo evento para o artigo.
+        
+        Args:
+            article: Instância do Article
+            name: Nome do evento (ex: "validation_started", "export_completed")
+            detail: Detalhes adicionais em formato JSON
+            user: Usuário responsável pelo evento
+        
+        Returns:
+            ArticleEvent instance
+        
+        Example:
+            ArticleEvent.create(
+                article=article_instance,
+                name="validation_completed",
+                detail={"status": "success", "errors": []},
+                user=request.user
+            )
+        """
+        try:
+            obj = cls()
+            obj.article = article
+            obj.name = name
+            obj.detail = detail
+            obj.creator = user
+            obj.save()
+            return obj
+        except Exception as e:
+            logging.exception(f"Error creating ArticleEvent: {e}")
+            raise EventSaveError(f"Unable to create article event: {e}")
+ 
+    def finish(self, completed, detail=None, errors=None, exceptions=None):
+        try:
+            self.completed = completed
+            detail = detail or {}
+            if errors:
+                detail["errors"] = errors
+            if exceptions:
+                detail["exceptions"] = exceptions
+                self.completed = False
+            self.detail = detail
+            obj.save()
+            return obj
+        except Exception as e:
+            logging.exception(f"Error finishing ArticleEvent: {e}")
+            raise EventSaveError(f"Unable to create article event: {e}")
+    
+    @classmethod
+    def get_article_events(cls, article, name=None, limit=None):
+        """
+        Retorna eventos de um artigo, ordenados do mais recente para o mais antigo.
+        
+        Args:
+            article: Instância do Article
+            name: Filtrar por nome do evento (opcional)
+            limit: Limitar número de resultados (opcional)
+        
+        Returns:
+            QuerySet de ArticleEvent
+        """
+        queryset = cls.objects.filter(article=article)
+        
+        if name:
+            queryset = queryset.filter(name=name)
+        
+        if limit:
+            queryset = queryset[:limit]
+        
+        return queryset
+    
+    @classmethod
+    def get_latest_event(cls, article, name=None):
+        """
+        Retorna o evento mais recente de um artigo.
+        
+        Args:
+            article: Instância do Article
+            name: Filtrar por nome do evento (opcional)
+        
+        Returns:
+            ArticleEvent instance ou None
+        """
+        queryset = cls.objects.filter(article=article)
+        
+        if name:
+            queryset = queryset.filter(name=name)
+        
+        return queryset.first()
+    
+    @classmethod
+    def count_events(cls, article, name=None):
+        """
+        Conta o número de eventos de um artigo.
+        
+        Args:
+            article: Instância do Article
+            name: Filtrar por nome do evento (opcional)
+        
+        Returns:
+            int: Número de eventos
+        """
+        queryset = cls.objects.filter(article=article)
+        
+        if name:
+            queryset = queryset.filter(name=name)
+        
+        return queryset.count()
+    
