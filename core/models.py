@@ -173,6 +173,14 @@ class Language(CommonControlField):
             for k, v in choices.LANGUAGE:
                 cls.get_or_create(name=v, code2=k, creator=user)
 
+    @staticmethod
+    def get_instance(language):
+        if not language:
+            return
+        if isinstance(language, Language):
+            return language
+        return Language.get(language)
+
     @classmethod
     def get_or_create(cls, name=None, code2=None, creator=None):
         code2 = language_iso(code2)
@@ -195,6 +203,15 @@ class Language(CommonControlField):
             obj.creator = creator
             obj.save()
             return obj
+
+    @classmethod
+    def get(cls, code2):
+        if not code2:
+            raise ValueError("Language.get requires params: code2")
+        try:
+            return cls.objects.get(code2=code2)
+        except cls.DoesNotExist:
+            return cls.objects.get(code2=language_iso(code2))
 
 
 class TextWithLang(models.Model):
