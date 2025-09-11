@@ -1,3 +1,4 @@
+import traceback
 import logging
 import sys
 from datetime import datetime
@@ -82,7 +83,7 @@ def load_article(user, xml=None, file_path=None, v3=None, pp_xml=None):
         - O processamento continua mesmo com falhas parciais
         - O campo article.valid indica se o processamento foi completo
     """
-    logging.info(f"load article {file_path} {v3}")
+    logging.info(f"load article {pp_xml} {v3} {file_path}")
     errors = []
     article = None  # Inicializar no início
 
@@ -90,24 +91,25 @@ def load_article(user, xml=None, file_path=None, v3=None, pp_xml=None):
     if not user:
         raise ValueError("User is required")
 
-    if not any([xml, file_path, v3]):
-        raise ValueError("At least one of xml, file_path, or v3 must be provided")
+    if not any([pp_xml, v3, file_path, xml]):
+        raise ValueError("load_article() requires params: pp_xml or v3 or file_path or xml")
 
     try:
-        if file_path:
+        if pp_xml:
+            xml_with_pre = pp_xml.xml_with_pre
+        elif v3:
+            pp_xml = PidProviderXML.objects.get(v3=v3)
+            xml_with_pre = pp_xml.xml_with_pre
+        elif file_path:
             for xml_with_pre in XMLWithPre.create(file_path):
                 xmltree = xml_with_pre.xmltree
                 break
         elif xml:
             xml_with_pre = XMLWithPre("", etree.fromstring(xml))
-        else:
-            raise ValueError(
-                "article.sources.xmlsps.load_article requires xml or file_path"
-            )
     except Exception as e:
         exc_type, exc_value, exc_traceback = sys.exc_info()
         UnexpectedEvent.create(
-            item=file_path or v3,
+            item=str(pp_xml or v3 or file_path or "xml"),
             action="article.sources.xmlsps.load_article",
             exception=e,
             exc_traceback=exc_traceback,
@@ -116,20 +118,29 @@ def load_article(user, xml=None, file_path=None, v3=None, pp_xml=None):
                 xml=f"{xml}",
                 v3=v3,
                 file_path=file_path,
+                pp_xml=str(pp_xml),
             ),
         )
-        return
+        item = str(pp_xml or v3 or file_path or "xml")
+        raise ValueError(f"Unable to get XML to load article from {item}: {e}")
 
     pid_v3 = v3 or xml_with_pre.v3
 
     try:
         # Sequência organizada para atribuição de campos do Article
         # Do mais simples (campos diretos) para o mais complexo (FKs e M2M)
+        event = None
         xmltree = xml_with_pre.xmltree
 
         # CRIAÇÃO/OBTENÇÃO DO OBJETO PRINCIPAL
-        article = Article.get_or_create(pid_v3=pid_v3, user=user)
+        article = Article.create_or_update(
+            user=user,
+            pid_v3=pid_v3,
+            doi=xml_with_pre.main_doi,
+            sps_pkg_name=xml_with_pre.sps_pkg_name,
+        )
 
+        event = article.add_event(user, _("load article"))
         # Configurar todos os campos antes de salvar (Sugestão 9)
         article.valid = False
         article.data_status = choices.DATA_STATUS_PENDING
@@ -202,16 +213,12 @@ def load_article(user, xml=None, file_path=None, v3=None, pp_xml=None):
         )
         article.doi.set(get_or_create_doi(xmltree=xmltree, user=user, errors=errors))
 
-        # FINALIZAÇÃO
         article.valid = not errors
-        if article.valid:
-            
-            article.check_availability(user)
-            if article.is_available():
-                article.data_status = choices.DATA_STATUS_PUBLIC
-
-        article.errors = errors
+        if errors:
+            article.errors = _("Consult events")
         article.save()  # Salvar estado final
+
+        event.finish(completed=not errors, errors=errors)
 
         if article.pp_xml is pp_xml and article.pp_xml.proc_status != PPXML_STATUS_DONE:
             pp_xml.proc_status = PPXML_STATUS_DONE
@@ -222,12 +229,24 @@ def load_article(user, xml=None, file_path=None, v3=None, pp_xml=None):
         )
         return article
     except Exception as e:
-        # Correção do bug (Sugestão 1)
-        errors.append({"error_type": str(type(e)), "error_message": str(e)})
-        if article:  # Verificar se article existe (Sugestão 2)
-            article.errors = errors
-            article.save()
-        return article
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        if event:
+            event.finish(errors=errors, exceptions=traceback.format_exc())
+            raise
+        UnexpectedEvent.create(
+            item=str(pp_xml or v3 or file_path or "xml"),
+            action="article.sources.xmlsps.load_article",
+            exception=e,
+            exc_traceback=exc_traceback,
+            detail=dict(
+                function="article.sources.xmlsps.load_article",
+                xml=f"{xml}",
+                v3=v3,
+                file_path=file_path,
+                pp_xml=str(pp_xml),
+            ),
+        )
+        raise
 
 
 def get_or_create_doi(xmltree, user, errors):
