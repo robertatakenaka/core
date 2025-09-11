@@ -8,6 +8,7 @@ from django.utils.translation import gettext_lazy as _
 from celery import group
 
 from article import controller
+from article.destination.articlemeta import bulk_export_articles_to_articlemeta, export_article_to_articlemeta
 from article.models import Article, ArticleFormat, ArticleSource
 from article.sources.preprint import harvest_preprints
 from article.sources.xmlsps import load_article
@@ -52,6 +53,133 @@ User = get_user_model()
 # - task_export_articles_to_articlemeta: Exporta artigos em lote para ArticleMeta
 # - task_export_article_to_articlemeta: Exporta um artigo para ArticleMeta
 # ==============================================================================
+@celery_app.task(bind=True, name="task_full_articles_workflow")
+def task_full_articles_workflow(
+    self,
+    user_id=None,
+    username=None,
+    collection_acron_list=None,
+    journal_acron_list=None,
+    from_pub_year=None,
+    until_pub_year=None,
+    from_updated_date=None,
+    until_updated_date=None,
+    proc_status_list=None,
+):
+    """
+    Tarefa para carregar artigos a partir de arquivos XML do PidProvider.
+    Processa todos os objetos PidProviderXML com status TODO, delegando
+    o processamento individual para task_full_article_workflow.
+
+    Args:
+        self: Instância da tarefa Celery
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        None
+
+    Side Effects:
+        - Dispara tarefas task_full_article_workflow para cada PidProviderXML
+        - Dispara tarefa de marcação de artigos deletados após conclusão
+        - Registra UnexpectedEvent em caso de erro
+    """
+    try:
+        user = get_user(self.request, username, user_id)
+
+        # Busca todos os PidProviderXML com status TODO
+        pp_xml_items = controller.get_pp_xml_ids_to_load_articles(
+            collection_acron_list=collection_acron_list,
+            journal_acron_list=journal_acron_list,
+            from_pub_year=from_pub_year,
+            until_pub_year=until_pub_year,
+            from_updated_date=from_updated_date,
+            until_updated_date=until_updated_date,
+            proc_status_list=proc_status_list,
+        )
+
+        # Cria um grupo de tarefas para processar em paralelo
+        job = group(
+            task_full_article_workflow.s(
+                pp_xml_id=pp_xml_id,
+                user_id=user_id or user.id,
+                username=username or user.username,
+            )
+            for pp_xml_id in pp_xml_items
+        )
+
+        # Executa todas as tarefas em paralelo e aguarda conclusão
+        result = job.apply_async()
+        result.get()  # Aguarda todas as tarefas terminarem
+
+    except Exception as exception:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=exception,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.task_full_articles_workflow",
+            },
+        )
+
+
+@celery_app.task(bind=True, name="task_full_article_workflow")
+def task_full_article_workflow(
+    self,
+    pp_xml_id,
+    user_id=None,
+    username=None,
+):
+    """
+    Tarefa para carregar um único artigo a partir de um arquivo XML.
+    Processa um objeto PidProviderXML específico, carregando o artigo
+    correspondente e marcando como DONE quando processado com sucesso.
+
+    Args:
+        self: Instância da tarefa Celery
+        pp_xml_id (int): ID do objeto PidProviderXML a processar
+        user_id (int, optional): ID do usuário executando a tarefa
+        username (str, optional): Nome do usuário executando a tarefa
+
+    Returns:
+        dict: Dicionário com status da operação e informações do artigo
+            {
+                'success': bool,
+                'pp_xml_id': int,
+                'article_id': int (opcional),
+                'error': str (opcional)
+            }
+
+    Side Effects:
+        - Cria/atualiza artigo no banco de dados
+        - Atualiza status de PidProviderXML para DONE quando bem-sucedido
+        - Registra UnexpectedEvent em caso de erro
+    """
+    try:
+        article = None
+        user = get_user(self.request, username, user_id)
+        pp_xml = PidProviderXML.objects.select_related("current_version").get(
+            id=pp_xml_id
+        )
+        article = load_article(
+            user,
+            file_path=pp_xml.current_version.file.path,
+            v3=pp_xml.v3,
+            pp_xml=pp_xml,
+        )
+        article.check_availability(user)
+
+    except Exception as exception:
+        # Erro geral na tarefa
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=exception,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.task_full_article_workflow",
+                "pp_xml_id": pp_xml_id,
+            },
+        )
 
 
 # ==============================================================================
@@ -383,11 +511,6 @@ def task_load_article_from_pp_xml(
             v3=pp_xml.v3,
             pp_xml=pp_xml,
         )
-
-        if article and article.valid:
-            # Marca como processado com sucesso
-            pp_xml.proc_status = PPXML_STATUS_DONE
-            pp_xml.save()
 
     except Exception as exception:
         # Erro geral na tarefa
@@ -833,7 +956,7 @@ def task_export_articles_to_articlemeta(
     """
     user = _get_user(self.request, username=username, user_id=user_id)
 
-    return controller.bulk_export_articles_to_articlemeta(
+    return bulk_export_articles_to_articlemeta(
         collections=collections,
         issn=issn,
         number=number,
@@ -882,6 +1005,6 @@ def task_export_article_to_articlemeta(
     """
     user = _get_user(self.request, username=username, user_id=user_id)
 
-    return controller.export_article_to_articlemeta(
+    return export_article_to_articlemeta(
         pid_v3=pid_v3, user=user, force_update=force_update, client=None
     )
