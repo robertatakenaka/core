@@ -42,12 +42,8 @@ from pid_provider.choices import PPXML_STATUS_DONE, PPXML_STATUS_TODO
 from pid_provider.models import PidProviderXML
 from pid_provider.provider import PidProvider
 from researcher.models import InstitutionalAuthor, Researcher
-from tracker.models import UnexpectedEvent
+from tracker.models import UnexpectedEvent, EventSaveError, BaseEvent
 from vocabulary.models import Keyword
-
-
-class EventCreatorError(Exception):
-    ...
 
 
 class Article(
@@ -1312,6 +1308,49 @@ class ArticleSource(CommonControlField):
         return f"ArticleSource #{self.pk}"
 
     @classmethod
+    def get_queryset(
+        collection_acron_list=None,
+        issn=None,
+        number=None,
+        volume=None,
+        year_of_publication=None,
+        from_date=None,
+        until_date=None,
+        days_to_go_back=None,
+    ):
+        filters = {}
+
+        # Issue number filter
+        if number:
+            filters["issue__number"] = number
+
+        # Issue volume filter
+        if volume:
+            filters["issue__volume"] = volume
+
+        # Year of publication filter
+        if year_of_publication:
+            filters["issue__year"] = year_of_publication
+
+        # Date range filter
+        if from_date or until_date or days_to_go_back:
+            from_date_str, until_date_str = date_utils.get_date_range(
+                from_date, until_date, days_to_go_back
+            )
+            filters["updated__range"] = (from_date_str, until_date_str)
+
+        if collection_acron_list:
+            filters["journal__scielojournal__collection__acron3__in"] = collection_acron_list
+
+        q = Q()
+        if issn:
+            q = (
+                Q(journal__official__issn_print=issn)
+                | Q(journal__official__issn_electronic=issn)
+            )
+        return cls.objects.filter(q, **filters)
+
+    @classmethod
     def get(cls, url):
         if url:
             try:
@@ -1608,67 +1647,137 @@ class ArticleSource(CommonControlField):
                 detail.append(str(response))
 
 
-class ArticleExport(CommonControlField):
+class ArticleExport(CommonControlField, ClusterableModel):
     """
     Controla exportações de artigos para diferentes bases de dados (articlemeta, crossref, pubmed)
     """
     article = models.ForeignKey(
         Article,
         on_delete=models.CASCADE,
+        null=False,
+        blank=False,
         related_name="exports",
-        verbose_name=_("Article")
     )
-    export_type = models.CharField(
-        max_length=50,
-        choices=[
-            ('articlemeta', 'ArticleMeta'),
-            ('crossref', 'CrossRef'),
-            ('pubmed', 'PubMed'),
-        ],
-        verbose_name=_("Export Type")
-    )
-    exported_at = models.DateTimeField(auto_now_add=True)
-    collection = models.ForeignKey(
-        'collection.Collection',
-        on_delete=models.SET_NULL,
+    destination = models.ForeignKey(
+        "ArticleExportDestination",
+        on_delete=models.CASCADE,
         null=True,
         blank=True,
         verbose_name=_("Collection")
     )
-    
+    status = models.CharField(
+        _("Status"),
+        max_length=15,
+        null=True,
+        blank=True,
+        choices=choices.EXPORTATION_STATUS,
+        default=choices.EXPORTATION_STATUS_TODO,
+    )
+    collection = models.ForeignKey(
+        'collection.Collection',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        verbose_name=_("Collection")
+    )
+
+    detail = models.JSONField(null=True, blank=True)
+    # se preencher, vai gerar histórico, se nunca preencher não mantém histórico
+    version = models.CharField(_("Version"), max_length=26, null=True, blank=True)
+
+    panels_ids = [
+        FieldPanel("article", read_only=True),
+        FieldPanel("collection", read_only=True),        
+        FieldPanel("destination", read_only=True),
+        FieldPanel("created", read_only=True),
+        FieldPanel("updated", read_only=True),
+    ]
+    panels_events = [
+        FieldPanel("status", read_only=True),
+        FieldPanel("detail", read_only=True),
+    ]
+
+    edit_handler = TabbedInterface(
+        [
+            ObjectList(panels_ids, heading=_("Identification")),
+            ObjectList(panels_events, heading=_("Events")),
+        ]
+    )
+
     class Meta:
-        unique_together = ['article', 'export_type', 'collection']
+        unique_together = ["article", "destination", "collection", "version"]
         indexes = [
-            models.Index(fields=['article', 'export_type']),
-            models.Index(fields=['exported_at']),
+            models.Index(fields=["article", "destination"]),
+            models.Index(fields=["-updated"]),
         ]
     
     def __str__(self):
-        return f"{self.article.pid_v3} -> {self.export_type}"
+        return f"{self.article.sps_pkg_name} {collection} -> {self.destination}"
 
     @classmethod
-    def mark_as_exported(cls, article, export_type, collection, user=None):
+    def start(cls, article, destination, collection, version=None, user=None):
         """Marca um artigo como exportado"""
         obj, created = cls.objects.get_or_create(
             article=article,
-            export_type=export_type,
+            destination=destination,
             collection=collection,
-            defaults={'creator': user}
+            version=version,
+            defaults={"creator": user}
         )
         if not created:
-            obj.exported_at = datetime.now()
+            obj.updated = datetime.now()
             obj.updated_by = user
-            obj.save()
+            
+        obj.status = choices.EXPORTATION_STATUS_TODO
+        obj.save()
         return obj
 
+    def finish(self, user, completed, events, errors=None, exceptions=None):
+        if errors or exceptions:
+            completed = False
+        if completed:
+            self.status = choices.EXPORTATION_STATUS_DONE
+        detail = detail or {}
+        if events:
+            detail["events"] = events
+        if errors:
+            detail["errors"] = errors
+        if exceptions:
+            detail["exceptions"] = exceptions
+        self.detail = detail
+        self.updated = datetime.now()
+        self.updated_by = user
+        self.save()
+
     @classmethod
-    def is_exported(cls, article, export_type, collection):
+    def is_exported(cls, article, destination, collection, version):
         """Verifica se um artigo já foi exportado"""
         return cls.objects.filter(
             article=article,
-            export_type=export_type,
-            collection=collection
-        ).exists()
+            destination=destination,
+            collection=collection,
+            version=version,
+        ).order_by("-updated").first().status == choices.EXPORTATION_STATUS_DONE
+
+
+class ArticleExportDestination(CommonControlField):
+    acronym = models.CharField(_("Acronym"), max_length=30, null=True, blank=False)
+
+    panels = [
+        FieldPanel("acronym"),
+    ]
+
+    base_form_class = CoreAdminModelForm
+    autocomplete_search_field = "acronym"
+
+    def autocomplete_label(self):
+        return str(self)
+
+    def __str__(self):
+        return f"{self.acronym}"
+
+    class Meta:
+        ordering = ["acronym"]
 
 
 class ArticleAvailability(CommonControlField):
@@ -1810,21 +1919,17 @@ def check_url(url, timeout=None):
         return True
 
 
-# Adicione este código ao arquivo article/models.py
-
 class ArticleEvent(BaseEvent, CommonControlField, Orderable):
     """
     Registra eventos relacionados a um artigo específico.
     Herda de BaseEvent (name, detail, created) e CommonControlField (creator, updated_by, etc)
     """
-    
     article = ParentalKey(
         Article,
         on_delete=models.CASCADE,
         related_name="events",
         verbose_name=_("Article")
     )
-    completed = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-created", "-id"]  # Mais recente primeiro
@@ -1844,29 +1949,7 @@ class ArticleEvent(BaseEvent, CommonControlField, Orderable):
     
     def __str__(self):
         return f"{self.name} - {self.created.strftime('%Y-%m-%d %H:%M:%S')}"
-    
-    @classmethod
-    def get(cls, article, name, created=None):
-        """
-        Busca um evento específico do artigo.
         
-        Args:
-            article: Instância do Article
-            name: Nome do evento
-            created: Data de criação (opcional)
-        
-        Returns:
-            ArticleEvent instance
-        
-        Raises:
-            ArticleEvent.DoesNotExist
-        """
-        filters = {"article": article, "name": name}
-        if created:
-            filters["created"] = created
-        
-        return cls.objects.get(**filters)
-    
     @classmethod
     def create(cls, user, article, name):
         """
@@ -1900,81 +1983,3 @@ class ArticleEvent(BaseEvent, CommonControlField, Orderable):
         except Exception as e:
             logging.exception(f"Error creating ArticleEvent: {e}")
             raise EventSaveError(f"Unable to create article event: {e}")
- 
-    def finish(self, completed, detail=None, errors=None, exceptions=None):
-        try:
-            self.completed = completed
-            detail = detail or {}
-            if errors:
-                detail["errors"] = errors
-            if exceptions:
-                detail["exceptions"] = exceptions
-                self.completed = False
-            self.detail = detail
-            obj.save()
-            return obj
-        except Exception as e:
-            logging.exception(f"Error finishing ArticleEvent: {e}")
-            raise EventSaveError(f"Unable to create article event: {e}")
-    
-    @classmethod
-    def get_article_events(cls, article, name=None, limit=None):
-        """
-        Retorna eventos de um artigo, ordenados do mais recente para o mais antigo.
-        
-        Args:
-            article: Instância do Article
-            name: Filtrar por nome do evento (opcional)
-            limit: Limitar número de resultados (opcional)
-        
-        Returns:
-            QuerySet de ArticleEvent
-        """
-        queryset = cls.objects.filter(article=article)
-        
-        if name:
-            queryset = queryset.filter(name=name)
-        
-        if limit:
-            queryset = queryset[:limit]
-        
-        return queryset
-    
-    @classmethod
-    def get_latest_event(cls, article, name=None):
-        """
-        Retorna o evento mais recente de um artigo.
-        
-        Args:
-            article: Instância do Article
-            name: Filtrar por nome do evento (opcional)
-        
-        Returns:
-            ArticleEvent instance ou None
-        """
-        queryset = cls.objects.filter(article=article)
-        
-        if name:
-            queryset = queryset.filter(name=name)
-        
-        return queryset.first()
-    
-    @classmethod
-    def count_events(cls, article, name=None):
-        """
-        Conta o número de eventos de um artigo.
-        
-        Args:
-            article: Instância do Article
-            name: Filtrar por nome do evento (opcional)
-        
-        Returns:
-            int: Número de eventos
-        """
-        queryset = cls.objects.filter(article=article)
-        
-        if name:
-            queryset = queryset.filter(name=name)
-        
-        return queryset.count()
-    
