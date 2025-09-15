@@ -8,7 +8,7 @@ from django.utils.translation import gettext_lazy as _
 from celery import group
 
 from article import controller
-from article.destination.articlemeta import bulk_export_articles_to_articlemeta, export_article_to_articlemeta
+from article.destination.articlemeta import bulk_data_export_to_articlemeta, get_export_destination, export_article_instances_to_articlemeta
 from article.models import Article, ArticleFormat, ArticleSource
 from article.sources.preprint import harvest_preprints
 from article.sources.xmlsps import load_article
@@ -169,6 +169,7 @@ def task_full_article_workflow(
         )
         article.check_availability(user)
 
+        # TODO exportar para AM
     except Exception as exception:
         # Erro geral na tarefa
         exc_type, exc_value, exc_traceback = sys.exc_info()
@@ -900,7 +901,7 @@ def convert_xml_to_other_formats(
 @celery_app.task(bind=True, name="task_export_articles_to_articlemeta")
 def task_export_articles_to_articlemeta(
     self,
-    collections=[],
+    collection_acron_list=None,
     issn=None,
     number=None,
     volume=None,
@@ -956,18 +957,18 @@ def task_export_articles_to_articlemeta(
     """
     user = _get_user(self.request, username=username, user_id=user_id)
 
-    return bulk_export_articles_to_articlemeta(
-        collections=collections,
-        issn=issn,
-        number=number,
-        volume=volume,
-        year_of_publication=year_of_publication,
-        from_date=from_date,
-        until_date=until_date,
-        days_to_go_back=days_to_go_back,
-        force_update=force_update,
-        user=user,
-        client=None,
+    queryset = Article.get_queryset(
+        collection_acron_list,
+        issn,
+        number,
+        volume,
+        year_of_publication,
+        from_date,
+        until_date,
+        days_to_go_back,
+    )
+    bulk_data_export_to_articlemeta(
+        user, queryset, force_update,
     )
 
 
@@ -975,36 +976,28 @@ def task_export_articles_to_articlemeta(
 def task_export_article_to_articlemeta(
     self, pid_v3=None, force_update=True, user_id=None, username=None
 ):
-    """
-    Exporta um único artigo para o banco de dados ArticleMeta.
-
-    Args:
-        self: Instância da tarefa Celery
-        pid_v3 (str): Identificador PID v3 do artigo a ser exportado
-        force_update (bool): Se True, força atualização mesmo se já existe. Default: True
-        user_id (int, optional): ID do usuário executando a tarefa
-        username (str, optional): Nome do usuário executando a tarefa
-
-    Returns:
-        bool: True se a exportação foi bem-sucedida, False caso contrário
-
-    Raises:
-        Article.DoesNotExist: Se o artigo com o pid_v3 fornecido não existir
-
-    Side Effects:
-        - Exporta artigo para o banco ArticleMeta
-        - Atualiza registro existente se force_update=True
-
-    Example:
-        # Exportar um artigo específico
-        task_export_article_to_articlemeta.delay(
-            pid_v3='JFhVphtq6czR6PHMvC4w38N',
-            force_update=True,
-            user_id=1
-        )
-    """
     user = _get_user(self.request, username=username, user_id=user_id)
 
-    return export_article_to_articlemeta(
-        pid_v3=pid_v3, user=user, force_update=force_update, client=None
-    )
+    try:
+        article = Article.objects.get(pid_v3=pid_v3)
+    except Article.DoesNotExist:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            item=pid_v3,
+            exception=Article.DoesNotExist,
+            exc_traceback=exc_traceback,
+            detail={
+                "task": "article.tasks.task_export_article_to_articlemeta",
+            },
+        )
+    else:    
+        destination = get_export_destination("articlemeta", user)
+        version = datetime.utcnow().isoformat()
+        export_article_instances_to_articlemeta(
+            destination,
+            article.collections,
+            user,
+            article,
+            version,
+            force_update,
+        )
