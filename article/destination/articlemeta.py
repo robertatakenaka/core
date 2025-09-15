@@ -1,260 +1,278 @@
 import logging
 import sys
+import traceback
+from datetime import datetime
 
 from django.db.models import Q
 from packtools.sps.formats.am import am
 
-from core.utils import date_utils
 from core.mongodb import write_to_db
-from tracker.models import UnexpectedEvent
+from core.utils import date_utils
 from journal.models import SciELOJournal
-from .models import Article, ArticleExport
+from tracker.models import UnexpectedEvent
+
+from .models import Article, ArticleExport, ArticleExportDestination
+
+
+class ArticleExportError(Exception): ...
+
+
+def get_export_destination(destination_name="articlemeta", user=None):
+    """Obtém o destino de exportação."""
+    try:
+        return ArticleExportDestination.objects.get(acronym=destination_name)
+    except ArticleExportDestination.MultipleObjectReturned:
+        return ArticleExportDestination.objects.filter(acronym=destination_name).first()
+    except ArticleExportDestination.DoesNotExist:
+        obj = ArticleExportDestination()
+        obj.acronym = destination_name
+        obj.creator = user
+        obj.save()
+        return obj
+
+
+def get_target_collections(selected_collection_acron_list, article):
+    if selected_collection_acron_list:
+        target_collections = [
+            c for c in article.collections if c.acron3 in selected_collection_acron_list
+        ]
+    else:
+        target_collections = article.collections
+
+    if not target_collections:
+        raise ValueError("No article collections found to export")
+
+
+def check_exportation_demand(
+    destination,
+    user,
+    article,
+    collection,
+    version,
+    force_update=None,
+):
+    """Exporta um artigo para uma única coleção."""
+    if force_update:
+        return ArticleExport.start(article, destination, collection, version, user)
+    if not ArticleExport.is_exported(article, destination, collection, version):
+        return ArticleExport.start(article, destination, collection, version, user)
+    raise ArticleExportError(f"{article} {collection} is already exported")
+
+
+def get_article_exports(
+    destination, user, article, target_collections, version, force_update=None
+):
+    if not target_collections:
+        target_collections = article.collections
+    for target_collection in target_collections:
+        try:
+            yield check_exportation_demand(
+                destination, user, article, target_collection, version, force_update
+            )
+        except ArticleExportError:
+            yield {
+                "collection": target_collection,
+                "exceptions": traceback.format_exc(),
+            }
+
+
+def get_article_data(
+    user,
+    article,
+):
+    """Exporta um artigo para o ArticleMeta."""
+    # Obtém o destino de exportação
+
+    try:
+        event = article.add_event(user, "prepare to export data to am")
+        # Prepara dados externos
+        external_data = {
+            "pid_v3": article.pid_v3,
+            "code": article.pid_v2,
+            "created_at": article.created.strftime("%Y-%m-%d"),
+            "document_type": article.article_type,
+            "processing_date": article.updated,
+            "publication_date": article.pub_date,
+            "publication_year": article.issue.year,
+            "version": "xml",
+        }
+
+        # Constrói formato ArticleMeta
+        article_data = am.build(article.xmltree, external_data)
+        event.finish(user, completed=True, detail=detail)
+
+        return article_data, external_data
+
+    except Exception as e:
+        event.finish(
+            user, completed=False, detail=detail, exceptions=traceback.format_exc()
+        )
+        raise
+
+
+def get_journal_data(journal, collection):
+    return journal.articlemeta_format(collection.acron3)
+
+
+def get_issue_data(issue, collection):
+    issue_data = issue.articlemeta_format(collection.acron3)
+    issue_data["processing_date"] = datetime.strptime(
+        issue_data["processing_date"], "%Y-%m-%d"
+    )
+    return issue_data
+
+
+def complete_data(
+    article,
+    collection,
+    article_data,
+    external_data,
+):
+    try:
+        events = []
+        article_data = article_data.copy()
+        external_data = external_data.copy()
+
+        issue_data = get_issue_data(article.issue, collection)
+        events.append(f"Got issue data {collection}")
+
+        # Prepara dados específicos da coleção
+        external_data.update({"collection": collection.acron3})
+        events.append(f"Updated article data with collection {collection}")
+
+        # Enriquece dados do artigo
+        # Article data
+        article_data.update(external_data)
+        article_data["code"] = article_data["article"]["code"]
+        events.append(f"Updated article data with article code {article_data['code']}")
+
+        # Issue data
+        article_data["code_issue"] = issue_data["code"]
+        article_data["issue"] = issue_data["issue"]
+        events.append(
+            f"Updated article data with issue data {article_data['code_issue']}"
+        )
+
+        # Journal data
+        article_data["code_title"] = [
+            x for x in issue_data["code_title"] if x is not None
+        ]
+        article_data["title"] = issue_data["title"]
+        events.append(
+            f"Updated article data with journal data {article_data['code_title']}"
+        )
+
+        return {"article_data": article_data, "events": events}
+
+    except Exception as e:
+        # Registra a exceção e finaliza com erro
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        exception_info = {
+            "type": exc_type.__name__ if exc_type else type(e).__name__,
+            "message": str(e),
+            "traceback": str(exc_traceback),
+        }
+        events.append(traceback.format_exc())
+        return {"events": events, "exceptions": traceback.format_exc()}
+
+
+def save_article_data(
+    user,
+    article_export,
+    data,
+):
+    """Exporta um artigo para uma única coleção."""
+    try:
+        record_id = write_item("articles", data)
+        if record_id:
+            article_export.finish(user, completed=True)
+            return record_id
+        raise Exception(f"Article {data.get('collection')} {data.get('code')}")
+    except Exception as e:
+        # Registra a exceção e finaliza com erro
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        exception_info = {
+            "type": exc_type.__name__ if exc_type else type(e).__name__,
+            "message": str(e),
+            "traceback": str(exc_traceback),
+        }
+        article_export.finish(user, completed=False, exceptions=traceback.format_exc())
 
 
 def export_article_to_articlemeta(
-    pid_v3,
-    collections=[],
-    force_update=True,
-    user=None,
-    client=None,
-) -> bool:
-    """
-    Convert an article to ArticleMeta format and write it to MongoDB.
-
-    Args:
-        pid_v3 (str): The PID v3 of the article to export.
-        collections (list): List of collection names to associate with the article.
-        force_update (bool): Whether to force update the export. Defaults to True.
-        user (User): The user associated with the export. Defaults to None.
-        client (MongoDB client): MongoDB client instance. Defaults to None.
-
-    Returns:
-        bool: True if the export was successful, False otherwise.
-    """
-    if not pid_v3:
-        logging.error("No pid_v3 or pid_v2 provided for export.")
-        return False
-
+    user,
+    article,
+    article_exports,
+):
+    """Exporta um artigo para uma única coleção."""
     try:
-        article = Article.get(pid_v3=pid_v3)
-    except Article.DoesNotExist:
-        logging.error(f"Article with pid_v3 {pid_v3} does not exist.")
-        return False
-
-    external_data = {
-        "collection": "",
-        "created_at": article.created.strftime("%Y-%m-%d"),
-        "document_type": "",
-        "processing_date": article.updated,
-        "publication_date": "",
-        "publication_year": "",
-        "version": "xml",  # Assuming the version is always 'xml'
-    }
-
-    # Build ArticleMeta format for the article
-    try:
-        article_data = am.build(article.xmltree, external_data)
+        items = []
+        event = article.add_event(user, "export article to AM")
+        article_data, external_data = get_article_data(user, article)
+        for article_export in article_exports:
+            item = {"collection": article_export.collection}
+            try:
+                complete_data_response = complete_data(
+                    article_export.article,
+                    article_export.collection,
+                    article_data,
+                    external_data,
+                )
+            except AttributeError:
+                event = article.add_event(user, "get article export AM")
+                event.finish(user, completed=False, detail=article_export)
+            else:
+                item["saved"] = save_article_data(
+                    user, article_export, complete_data_response["article_data"]
+                )
+            items.append(item)
+        event.finish(user, completed=True, detail=items)
     except Exception as e:
-        logging.error(f"Error building ArticleMeta format for article {pid_v3}: {e}")
+        # Registra a exceção e finaliza com erro
         exc_type, exc_value, exc_traceback = sys.exc_info()
-        UnexpectedEvent.create(
-            exception=e,
-            exc_traceback=exc_traceback,
-            detail={
-                "operation": "export_article_to_articlemeta",
-                "pid_v3": pid_v3,
-                "force_update": force_update,
-                "stage": "building articlemeta format for article",
-            },
-        )
-        return False
+        exception_info = {
+            "type": exc_type.__name__ if exc_type else type(e).__name__,
+            "message": str(e),
+            "traceback": str(exc_traceback),
+        }
+        event.finish(user, completed=False, exceptions=traceback.format_exc())
 
-    # Restrict collections if provided
-    cols = (
-        [c for c in article.collections if c.acron3 in collections]
-        if collections
-        else article.collections
+
+def export_article_instances_to_articlemeta(
+    destination,
+    target_collections,
+    user,
+    article,
+    version=None,
+    force_update=None,
+):
+    # Exporta para cada coleção
+    article_exports = get_article_exports(
+        destination, user, article, target_collections, version, force_update
     )
-
-    for col in cols:
-        if not force_update and ArticleExport.is_exported(article, "articlemeta", col):
-            logging.info(
-                f"Article {pid_v3} already exported to ArticleMeta in collection {col}."
-            )
-            continue
-
-        external_data.update({"collection": col.acron3})
-        article_data.update(external_data)
-
-        # Build ArticleMeta format for the issue
-        try:
-            issue_data = article.issue.articlemeta_format(col.acron3)
-        except Exception as e:
-            logging.error(
-                f"Error converting issue data for ArticleMeta export for article {pid_v3}: {e}"
-            )
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            UnexpectedEvent.create(
-                exception=e,
-                exc_traceback=exc_traceback,
-                detail={
-                    "operation": "export_article_to_articlemeta",
-                    "pid_v3": pid_v3,
-                    "force_update": force_update,
-                    "stage": "building articlemeta format for issue",
-                },
-            )
-
-            issue_data = {}
-
-        # Update ArticleMeta format with issue and journal data
-        try:
-            # Article data
-            article_data["code"] = article_data["article"]["code"]
-            article_data["document_type"] = article.article_type
-            article_data["publication_date"] = article.pub_date
-            article_data["publication_year"] = article.pub_date_year
-
-            # Issue data
-            article_data["code_issue"] = issue_data["code"]
-            article_data["issue"] = issue_data["issue"]
-
-            # Journal data
-            article_data["code_title"] = [
-                x for x in issue_data["code_title"] if x is not None
-            ]
-            article_data["title"] = issue_data["title"]
-        except Exception as e:
-            logging.error(
-                f"Error updating ArticleMeta format with issue and journal data for article with pid_v3 {pid_v3}: {e}"
-            )
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            UnexpectedEvent.create(
-                exception=e,
-                exc_traceback=exc_traceback,
-                detail={
-                    "operation": "export_article_to_articlemeta",
-                    "pid_v3": pid_v3,
-                    "force_update": force_update,
-                    "stage": "updating articlemeta format with issue and journal data",
-                },
-            )
-
-        # Export the article to ArticleMeta
-        try:
-            success = write_to_db(
-                data=article_data,
-                database="articlemeta",
-                collection="articles",
-                force_update=force_update,
-                client=client,
-            )
-
-            # Mark the article as exported to ArticleMeta in the collection
-            if success:
-                ArticleExport.mark_as_exported(article, "articlemeta", col, user)
-        except Exception as e:
-            logging.error(
-                f"Error writing article {pid_v3} to ArticleMeta database: {e}"
-            )
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            UnexpectedEvent.create(
-                exception=e,
-                exc_traceback=exc_traceback,
-                detail={
-                    "operation": "export_article_to_articlemeta",
-                    "pid_v3": pid_v3,
-                    "force_update": force_update,
-                    "stage": "writing article to articlemeta database",
-                },
-            )
-
-    return True
+    return export_article_to_articlemeta(user, article, article_exports)
 
 
-def bulk_export_articles_to_articlemeta(
-    collections=[],
-    issn=None,
-    number=None,
-    volume=None,
-    year_of_publication=None,
-    from_date=None,
-    until_date=None,
-    days_to_go_back=None,
-    force_update=True,
-    user=None,
-    client=None,
-) -> bool:
-    """
-    Bulk export articles to ArticleMeta.
+def bulk_data_export_to_articlemeta(
+    user,
+    queryset,
+    force_update=None,
+):
+    """Exporta múltiplos artigos para o ArticleMeta."""
+    # Obtém queryset filtrado
 
-    Args:
-        collections (list): List of collection acronyms to filter articles.
-        issn (str): ISSN to filter articles.
-        number (int): Issue number to filter articles.
-        volume (int): Issue volume to filter articles.
-        year_of_publication (int): Year of publication to filter articles.
-        from_date (str): Start date to filter articles.
-        until_date (str): End date to filter articles.
-        days_to_go_back (int): Number of days to go back from today or until_date to filter articles.
-        force_update (bool): Whether to force update the export. Defaults to True.
-        user (User): User object.
-        client (MongoDB client): MongoDB client instance. A default client will be created if not provided.
+    total_articles = queryset.count()
+    if total_articles == 0:
+        raise ValueError(f"No article to export to AM")
 
-    Returns:
-        bool: True if the export was successful, False otherwise.
-    """
-    filters = {}
-
-    # Issue number filter
-    if number:
-        filters["issue__number"] = number
-
-    # Issue volume filter
-    if volume:
-        filters["issue__volume"] = volume
-
-    # Year of publication filter
-    if year_of_publication:
-        filters["pub_date_year"] = year_of_publication
-
-    # Date range filter
-    if from_date or until_date or days_to_go_back:
-        from_date_str, until_date_str = date_utils.get_date_range(
-            from_date, until_date, days_to_go_back
-        )
-        filters["updated__range"] = (from_date_str, until_date_str)
-
-    # Build queryset with filters
-    queryset = Article.objects.filter(**filters)
-
-    # Add ISSN filter separately using Q objects
-    if issn:
-        queryset = queryset.filter(
-            Q(journal__official__issn_print=issn)
-            | Q(journal__official__issn_electronic=issn)
-        )
-
-    # Filter articles by collections if specified
-    if collections:
-        queryset = queryset.filter(
-            journal__scielojournal__collection__acron3__in=collections
-        )
-
-    logging.info(f"Starting export of {queryset.count()} articles to ArticleMeta.")
-
-    # Iterate over queryset and export each article to ArticleMeta
+    destination = get_export_destination("articlemeta", user)
+    version = datetime.utcnow().isoformat()
     for article in queryset.iterator():
-        export_article_to_articlemeta(
-            pid_v3=article.pid_v3,
-            collections=(
-                [c.acron3 for c in article.collections]
-                if not collections
-                else collections
-            ),
-            force_update=force_update,
-            user=user,
-            client=client,
+        export_article_instances_to_articlemeta(
+            destination,
+            article.collections,
+            user,
+            article,
+            version,
+            force_update,
         )
-
-    logging.info(f"Export completed.")
