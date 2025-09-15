@@ -17,6 +17,7 @@ from article.models import (  # AbstractModel,; Category,; Title,
     ArticleFormat,
     ArticleFunding,
     ArticleSource,
+    ArticleExportDestination,
 )
 from collection.models import Collection
 from config.menu import get_menu_order
@@ -140,6 +141,27 @@ class ArticleFormatAdmin(ModelAdmin):
     )
 
 
+class ArticleExportDestinationModelAdmin(ModelAdmin):
+    model = ArticleExportDestination
+    menu_label = _("Export Destinations")
+    menu_icon = "doc-full-inverse"
+    menu_order = 200
+    add_to_settings_menu = False
+    exclude_from_explorer = False
+    list_display = ("acronym", "created", "updated")
+    list_filter = ("created", "updated")
+    search_fields = ("acronym",)
+    inspect_view_enabled = True
+    
+    def get_queryset(self, request):
+        """
+        Otimiza o queryset base para evitar queries N+1
+        """
+        qs = super().get_queryset(request)
+        # Se houver FKs no futuro, adicionar select_related/prefetch_related aqui
+        return qs
+
+
 class ArticleFundingCreateView(CreateView):
     def form_valid(self, form):
         self.object = form.save_all(self.request.user)
@@ -171,7 +193,7 @@ class ArticleAdminGroup(ModelAdminGroup):
     menu_order = get_menu_order(
         "article"
     )  # will put in 3rd place (000 being 1st, 100 2nd)
-    items = (ArticleAdmin, ArticleExportAdmin, ArticleFormatAdmin, ArticleFundingAdmin)
+    items = (ArticleAdmin, ArticleExportDestinationModelAdmin, ArticleExportAdmin, ArticleFormatAdmin, ArticleFundingAdmin)
 
 
 modeladmin_register(ArticleAdminGroup)
