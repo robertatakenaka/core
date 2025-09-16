@@ -2,10 +2,10 @@ import csv
 import os
 
 from django.contrib.auth import get_user_model
-from django.db import models, IntegrityError
-from django.db.models import Case, When, Value, IntegerField
-from django.utils.translation import gettext_lazy as _
+from django.db import IntegrityError, models
+from django.db.models import Case, IntegerField, Value, When
 from django.utils.html import strip_tags
+from django.utils.translation import gettext_lazy as _
 from wagtail.admin.panels import FieldPanel
 from wagtail.fields import RichTextField
 from wagtail.search import index

@@ -8,7 +8,6 @@ from django.db import IntegrityError, models
 from django.db.models import Q
 from django.db.utils import DataError
 from django.utils.translation import gettext_lazy as _
-from django.utils.translation import gettext_lazy as _
 from django_prometheus.models import ExportModelOperationsMixin
 from legendarium.formatter import descriptive_format
 from modelcluster.fields import ParentalKey

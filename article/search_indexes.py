@@ -1,10 +1,9 @@
 from haystack import indexes
+from legendarium.formatter import descriptive_format
 
 from journal.models import SciELOJournal
 
 from .models import Article
-
-from legendarium.formatter import descriptive_format
 
 
 class ArticleIndex(indexes.SearchIndex, indexes.Indexable):

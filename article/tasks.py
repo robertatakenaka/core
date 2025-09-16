@@ -13,14 +13,13 @@ from article.sources.xmlsps import load_article
 from collection.models import Collection
 from config import celery_app
 from core.utils.extracts_normalized_email import extracts_normalized_email
-from core.utils.utils import fetch_data, _get_user
+from core.utils.utils import _get_user, fetch_data
 from journal.models import SciELOJournal
 from pid_provider.choices import PPXML_STATUS_DONE, PPXML_STATUS_TODO
 from pid_provider.models import PidProviderXML
 from pid_provider.provider import PidProvider
 from researcher.models import ResearcherIdentifier
 from tracker.models import UnexpectedEvent
-
 
 User = get_user_model()
 

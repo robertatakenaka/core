@@ -5,8 +5,8 @@ import sys
 from django.db.models import Q
 from packtools.sps.formats.am import am
 
-from core.utils import date_utils
 from core.mongodb import write_to_db
+from core.utils import date_utils
 from institution.models import Sponsor
 from tracker.models import UnexpectedEvent
 
