@@ -516,7 +516,7 @@ def task_export_articles_to_articlemeta(
     """
     Export articles to ArticleMeta Database with flexible filtering.
     Note that from_date and until_date filters work on the field `updated` from Article.
-    
+
     Args:
         collections: Filter by collections (e.g. ['scl', 'mex'])
         issn: Filter by journal ISSN
@@ -548,7 +548,9 @@ def task_export_articles_to_articlemeta(
 
 
 @celery_app.task(bind=True, name="task_export_article_to_articlemeta")
-def task_export_article_to_articlemeta(self, pid_v3=None, force_update=True, user_id=None, username=None):
+def task_export_article_to_articlemeta(
+    self, pid_v3=None, force_update=True, user_id=None, username=None
+):
     """
     Export a single article to ArticleMeta Database.
 
@@ -564,8 +566,5 @@ def task_export_article_to_articlemeta(self, pid_v3=None, force_update=True, use
     user = _get_user(self.request, username=username, user_id=user_id)
 
     return controller.export_article_to_articlemeta(
-        pid_v3=pid_v3,
-        user=user,
-        force_update=force_update,
-        client=None
+        pid_v3=pid_v3, user=user, force_update=force_update, client=None
     )
