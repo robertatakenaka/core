@@ -7,12 +7,9 @@ from wagtail.snippets.views.snippets import (
     SnippetViewSetGroup,
 )
 
-
-from .models import Issue, IssueExport
 from config.menu import get_menu_order
 from config.settings.base import COLLECTION_TEAM, JOURNAL_TEAM
-
-from .models import Issue
+from issue.models import Issue, IssueExport, LegacyIssue
 
 
 class IssueCreateView(CreateView):
@@ -79,47 +76,39 @@ class IssueAdminSnippetViewSet(SnippetViewSet):
         return qs.none()
 
 
-
-class IssueExportCreateView(CreateView):
-    def form_valid(self, form):
-        self.object = form.save_all(self.request.user)
-        return HttpResponseRedirect(self.get_success_url())
-
-
-class IssueExportAdmin(SnippetViewSet):
+@register_snippet
+class IssueExportViewSet(BaseExportViewSet):
     model = IssueExport
-    add_view_class = IssueExportCreateView
-    inspect_view_enabled = True
+    icon = "folder"
     menu_label = _("Issue Exports")
-    menu_icon = "download"
-    menu_order = 160
-    add_to_settings_menu = False
-    exclude_from_explorer = False
+    search_fields = ["issue__volume", "issue__number"]
 
-    list_display = (
-        "issue",
-        "export_type",
-        "collection",
-        "created",
-        "updated",
-    )
-    list_filter = (
-        "export_type",
-        "collection",
-    )
-    search_fields = (
-        "issue__journal__title",
-        "issue__number",
-        "issue__volume",
-        "issue__year",
-    )
 
+class LegacyIssueViewSet(SnippetViewSet):
+    model = LegacyIssue
+    icon = "doc-full"
+    menu_label = _("AM Issues")
+    menu_icon = "folder-open-inverse"
+    menu_order = 200
+    add_to_admin_menu = True
+    list_display = [
+        "pid",
+        "collection",
+        "status",
+        "processing_date",
+    ]
+    list_filter = ["status", "collection"]
+    search_fields = ["pid", "collection", "processing_date"]
+    list_per_page = 50
+    list_export = ["pid", "collection", "status", "processing_date"]
+    inspect_view_enabled = True
+    
 
 class IssueAdminSnippetViewSetGroup(SnippetViewSetGroup):
     menu_label = _("Issues")
     menu_icon = "folder-open-inverse"
     menu_order = get_menu_order("issue")
-    items = (IssueAdminSnippetViewSet, IssueExportAdmin)
+    items = (LegacyIssueViewSet, IssueAdminSnippetViewSet, IssueExportViewSet)
 
 
 register_snippet(IssueAdminSnippetViewSetGroup)

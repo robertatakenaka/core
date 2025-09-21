@@ -197,6 +197,14 @@ class Collection(CommonControlField, ClusterableModel):
     base_form_class = CoreAdminModelForm
 
     @classmethod
+    def registered_acron3(cls, collection_acron3_list):
+        if not collection_acron3_list:
+            return Collection.objects.values_list("acron3", flat=True)
+        if isinstance(collection_acron3_list, str):
+            collection_acron3_list = [collection_acron3_list]
+        return Collection.objects.filter(acron3__in=collection_acron3_list).values_list("acron3", flat=True)    
+
+    @classmethod
     def load(cls, user, collections_data=None):
         if not collections_data:
             collections_data = fetch_data(
@@ -264,7 +272,6 @@ class Collection(CommonControlField, ClusterableModel):
     def name(self):
         return CollectionName.objects.filter(collection=self).iterator()
 
-
     def get_name_for_language(self, lang_code=None):
         """
         Retorna o nome da coleção no idioma especificado.
@@ -277,6 +284,7 @@ class Collection(CommonControlField, ClusterableModel):
         if name_obj:
             return name_obj.text
         return self.main_name or (self.collection_name.first().text if self.collection_name.exists() else "")
+
 
 class CollectionSocialNetwork(Orderable, SocialNetwork):
     page = ParentalKey(

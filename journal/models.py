@@ -28,8 +28,10 @@ from core.models import (
     RichTextWithLanguage,
     SocialNetwork,
     TextWithLang,
+    Export,
 )
 from core.utils.thread_context import get_current_collections, get_current_user
+from core.utils import date_utils
 from institution.models import (
     BaseHistoryItem,
     CopyrightHolder,
@@ -52,6 +54,7 @@ from journal.exceptions import (
     TitleInDatabaseCreationOrUpdateError,
     WosdbCreationOrUpdateError,
 )
+from journal.am_export.articlemeta_format import get_articlemeta_format_title
 from location.models import Location
 from organization.dynamic_models import (
     OrgLevelCopyrightHolder,
@@ -730,6 +733,21 @@ class Journal(CommonControlField, ClusterableModel):
             ),
         ]
 
+    def get_journal_pid(self, collection):
+        try:
+            pid = self.scielojournal_set.filter(collection=collection).issn_scielo
+        except AttributeError:
+            pid = None
+        if not pid:
+            raise ArticlemetaIssueFormatterMissingEssencialDataError(
+                f"Unable to get valid journal_pid for {self} {collection}")
+
+    def get_journal_acron(self, collection):
+        value = self.scielojournal_set.filter(collection=collection).journal_acron
+        if not value:
+            raise ArticlemetaIssueFormatterMissingEssencialDataError(
+                f"Unable to get valid journal_acron for {self} {collection}")
+
     def is_indexed_at(self, db_acronym):
         if not db_acronym:
             raise ValueError("Journal.is_indexed_at requires db_acronym")
@@ -875,11 +893,26 @@ class Journal(CommonControlField, ClusterableModel):
         title = self.title
         return f"{title} ({collection_acronym}) | ({issns_str})"
 
-    def articlemeta_format(self, collection):
-        # Evita importacao circular
-        from .formats.articlemeta_format import get_articlemeta_format_title
+    def get_journal_data_from_external_databases(self):
+        data = {}
+        for item in self.obj.title_in_database.all():
+            data[item.data["indexed_at"]] = item.data
+        return data
 
-        return get_articlemeta_format_title(self, collection)
+    def articlemeta_format(self, collection):
+        return get_articlemeta_format_title(
+            self,
+            collection,
+            self.scielojournal_set.filter(collection=collection).first(),
+        )
+
+    def select_scielo_journal(self, collection=None):
+        if self.journal.scielojournal_set.count() == 1:
+            return self.journal.scielojournal_set.first()
+    
+        return SciELOJournal.objects.filter(
+            collection__acron3=collection.acron3
+        )
 
     base_form_class = CoreAdminModelForm
 
@@ -1812,67 +1845,49 @@ class SciELOJournal(CommonControlField, ClusterableModel, SocialNetwork):
         obj.save()
         return obj
 
-
-class SciELOJournalExport(CommonControlField):
-    """
-    Controla exportações de periódicos para o articlemeta
-    """
-
-    scielo_journal = models.ForeignKey(
-        SciELOJournal,
-        on_delete=models.CASCADE,
-        related_name="exports",
-        verbose_name=_("SciELO Journal"),
-    )
-    export_type = models.CharField(
-        max_length=50,
-        choices=[
-            ("articlemeta", "ArticleMeta"),
-        ],
-        verbose_name=_("Export Type"),
-    )
-    exported_at = models.DateTimeField(auto_now_add=True)
-    collection = models.ForeignKey(
-        "collection.Collection",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        verbose_name=_("Collection"),
-    )
-
-    class Meta:
-        unique_together = ["scielo_journal", "export_type", "collection"]
-        indexes = [
-            models.Index(fields=["scielo_journal", "export_type"]),
-            models.Index(fields=["exported_at"]),
-        ]
-
-    def __str__(self):
-        return f"{self.scielo_journal.issn_scielo} -> {self.export_type}"
+    @classmethod
+    def get_instance(cls, collection_acron3, user=None):
+        try:
+            return cls.objects.get(issn_scielo=issn_scielo, collection__acron3=collection_acron3)
+        except cls.DoesNotExist:
+            if user:
+                try:
+                    collection = Collection.objects.get(acron3=collection_acron3)
+                    return cls.create_or_update(user, collection, issn_scielo)
+                except Collection.DoesNotExist:
+                    pass
+            raise cls.DoesNotExist(f"SciELOJournal {collection_acron3} {issn_scielo} is not registered")
+        except cls.MultipleObjectsReturned:
+            return cls.objects.filter(issn_scielo=issn_scielo, collection__acron3=collection_acron3).first()
 
     @classmethod
-    def mark_as_exported(cls, scielo_journal, export_type, collection, user=None):
-        """Marca um periódico SciELO como exportado"""
-        obj, created = cls.objects.get_or_create(
-            scielo_journal=scielo_journal,
-            export_type=export_type,
-            collection=collection,
-            defaults={"creator": user},
-        )
-        if not created:
-            obj.exported_at = datetime.now()
-            obj.updated_by = user
-            obj.save()
-        return obj
+    def select_scielo_journals(cls, collection_acron_list=None, journal_acron_list=None, from_date=None, until_date=None, days_to_go_back=None):
+        params = {}
+        if from_date or until_date or days_to_go_back:
+            from_date_str, until_date_str = date_utils.get_date_range(from_date, until_date, days_to_go_back)
+            params["updated__range"] = (from_date_str, until_date_str)
+        if collection_acron_list:
+            params["collection__acron3__in"] = collection_acron_list
+        if journal_acron_list:
+            params["journal_acron__in"] = journal_acron_list
+        return cls.objects.filter(**params)    
 
     @classmethod
-    def is_exported(cls, scielo_journal, export_type, collection):
-        """Verifica se um periódico SciELO já foi exportado"""
-        return cls.objects.filter(
-            scielo_journal=scielo_journal,
-            export_type=export_type,
-            collection=collection,
-        ).exists()
+    def get_issn_list(cls, collection_acron_list=None, journal_acron_list=None):
+        qs = cls.select_journals(collection_acron_list, journal_acron_list)
+        return {
+            "issn_print_list": qs.values_list(
+                "journal__official__issn_print", flat=True
+            ),
+            "issn_electronic_list": qs.values_list(
+                "journal__official__issn_electronic", flat=True
+            ),
+        }
+
+    @classmethod
+    def get_journal_ids(cls, collection_acron_list=None, journal_acron_list=None):
+        qs = cls.select_journals(collection_acron_list, journal_acron_list)
+        return qs.values_list("id", flat=True)
 
 
 class JournalParallelTitle(TextWithLang):
@@ -2246,7 +2261,6 @@ class IndexedAt(CommonControlField):
         obj.type = dict(choices.TYPE).get(type) if type else obj.type
         obj.updated_by = user
         obj.save()
-
         return obj
 
 
@@ -2657,6 +2671,14 @@ class TitleInDatabase(Orderable, CommonControlField):
     def __str__(self):
         return f"{self.indexed_at} | {self.title} | {self.identifier}"
 
+    @property
+    def data(self):
+        return {
+            "title": self.title,
+            "identifier": self.identifier,
+            "indexed_at": self.indexed_at.acronym.lower(),
+        }
+
 
 class DataRepository(Orderable, CommonControlField):
     journal = ParentalKey(
@@ -2931,3 +2953,9 @@ class TocItem(Orderable, TextWithLang, CommonControlField):
 
     def __str__(self):
         return f"{self.text} | {self.language}"
+
+
+class JournalExport(BaseExport):
+    parent = ParentalKey(
+        Journal, on_delete=models.CASCADE, related_name="export",
+    )

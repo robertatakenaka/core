@@ -1,46 +1,37 @@
 from collections import defaultdict
 from functools import lru_cache
 
-from article.models import Article
 from core.utils.articlemeta_dict_utils import add_items, add_to_result, add_multiple_to_result
-from journal.models import SciELOJournal, TitleInDatabase
-from journal.formats.articlemeta_format import ArticlemetaJournalFormatter
+
+
+class ArticlemetaIssueFormatterMissingEssencialDataError(Exception):
+    ...
+
 
 class ArticlemetaIssueFormatter:
     """Formatador para dados do Issue"""
     def __init__(self, obj, collection):
         self.obj = obj
-        self.collection_acron = collection
+        self.collection = collection
+        self.journal = self.obj.journal
+        self.scielo_journal = self.journal.scielojournal_set.filter(collection=collection).first()
         self.result = defaultdict(list)
         self.result['issue'] = {}
-        self.journal = self.obj.journal
-        self._scielo_journal = None
-        self._medline_titles = None
-        self.article = Article.objects.filter(issue=self.obj, journal=self.journal)
-    
-    @property
-    def scielo_journal(self):
-        if self._scielo_journal is not None:
-            return self._scielo_journal
-        
-        qs = SciELOJournal.objects.select_related(
-            'journal', 'collection'
-        ).filter(
-            journal=self.journal,
-        )
-        if self.collection_acron:
-            qs = qs.filter(collection__acron3=self.collection_acron)
-
-        self._scielo_journal = qs.first()
-        return self._scielo_journal
 
     @property
-    @lru_cache(maxsize=1)
-    def medline_titles(self):
-        return list(TitleInDatabase.objects.filter(
-            journal=self.journal, 
-            indexed_at__acronym__iexact="medline"
-        ))
+    @lru_cache(max_size=1)
+    def journal_pid(self):
+        return self.scielo_journal.issn_pid
+
+    @property
+    @lru_cache(max_size=1)
+    def journal_acron(self):
+        return self.scielo_journal.journal_acron
+
+    @property
+    @lru_cache(max_size=1)
+    def issue_pid(self):
+        return self.obj.get_issue_pid(self.collection)
     
     def format(self):
         """Formata todos os dados do issue"""
@@ -72,11 +63,12 @@ class ArticlemetaIssueFormatter:
         """Informações básicas do issue"""
         # Path to base issue
         
+        issue_pid_suffix = int(self.obj.issue_pid_suffix)
         add_multiple_to_result(
             {
                 "v31": self.obj.volume,
                 "v32": self.obj.number,
-                "v36": f"{self.obj.year}{self.obj.number}" if self.obj.number else self.obj.year,
+                "v36": f"{self.obj.year}{self.obj.issue_pid_suffix}",
                 "v42": '1',
             },
             self.result['issue']
@@ -92,23 +84,10 @@ class ArticlemetaIssueFormatter:
         self._format_issue_type()
 
     def _format_volume_supplement_number_info(self):
-        volume = self.obj.volume
-        number = self.obj.number
-        supplement = self.obj.supplement
-
-        if volume:
-            if number:
-                v4 = f"v{volume}n{number}"
-            elif supplement:
-                v4 = f"v{volume}s{supplement}"
-            else:
-                v4 = f"v{volume}"
-            self.result['issue']["v4"] = v4
+        self.result['issue']["v4"] = self.obj.issue_folder
 
     def _format_issue_type(self):
-        if self.obj.supplement and not self.obj.number:
-            self.result["issue_type"] = "supplement"
-
+        self.result["issue_type"] = self.obj.issue_type
 
     def _format_publication_info(self):
         """Informações de publicação"""
@@ -124,11 +103,10 @@ class ArticlemetaIssueFormatter:
 
     def _format_collection_info(self):
         """Informações de coleção"""
-        collection = self.scielo_journal.collection
-        if collection:
-            add_to_result("v992", collection.acron3, self.result['issue'])
-            self.result['collection'] = collection.acron3
-            self.result['issue']['collection'] = collection.acron3
+        collection = self.collection
+        add_to_result("v992", collection.acron3, self.result['issue'])
+        self.result['collection'] = collection.acron3
+        self.result['issue']['collection'] = collection.acron3
 
     def _format_journal_info(self):
         """Informações do journal"""
@@ -144,8 +122,7 @@ class ArticlemetaIssueFormatter:
         if self.journal and self.journal.journal_use_license:
             add_to_result("v541", self.journal.journal_use_license.license_type, self.result['issue'])
 
-        if self.scielo_journal:
-            add_to_result("v930", self.scielo_journal.journal_acron.upper() if self.scielo_journal.journal_acron else None, self.result['issue'])
+        add_to_result("v930", self.journal_acron, self.result['issue'])
         
         if self.journal.vocabulary:
             add_to_result("v85", self.journal.vocabulary.acronym, self.result['issue'])
@@ -153,7 +130,6 @@ class ArticlemetaIssueFormatter:
         if self.journal.official:
             add_to_result("v151", self.journal.official.iso_short_title, self.result['issue'])
             add_items("v230", [pt.text for pt in self.journal.official.parallel_titles if pt.text], self.result['issue'])
-
 
     def _format_institution_info(self):
         """Informações de instituições"""
@@ -170,8 +146,10 @@ class ArticlemetaIssueFormatter:
                 add_items(key, items, self.result['issue'])
 
     def _format_title_in_database(self):
-        medline_data = self.medline_titles
-        add_items("v421", [medline.title for medline in medline_data], self.result['issue'])
+        external_journal_data = self.obj.get_journal_data_from_external_databases()
+        medline_data = external_journal_data.get("medline")
+        if medline_data:
+            add_items("v421", [medline_data["title"]], self.result['issue'])
 
     def _format_metadata(self):
         """Metadados e relacionamentos"""
@@ -179,12 +157,12 @@ class ArticlemetaIssueFormatter:
             "publication_date": self.obj.year,
             "publication_year": self.obj.year,
             "created_at": self.obj.created.strftime("%Y-%m-%d"),
-            "processing_date": self.obj.created.strftime("%Y-%m-%d"),
+            "processing_date": self.obj.updated.strftime("%Y-%m-%d"),
         }
         for key, value in key_to_code.items():
             self.result[key] = value
 
-        self.result['issue']["processing_date"] = self.obj.created.strftime("%Y-%m-%d")
+        self.result['issue']["processing_date"] = self.obj.updated.strftime("%Y-%m-%d")
         add_to_result("v91", self.obj.created.strftime("%Y%m%d"), self.result['issue'])
 
     def _format_system_info(self):
@@ -210,10 +188,11 @@ class ArticlemetaIssueFormatter:
 
     def _format_field_use_system(self):
         """Campo usado no sistema"""
-        if self.scielo_journal:
-            field_value = f"{self.scielo_journal.journal_acron.upper()}{self.obj.volume}{self.obj.number}"
-            add_to_result("v888", field_value, self.result['issue'])
-    
+        # if self.scielo_journal:
+        #     field_value = f"{self.journal_acron.upper()}{self.obj.volume}{self.obj.number}"
+        #     add_to_result("v888", field_value, self.result['issue'])
+        return
+
     def _format_legend_bibliographic(self):
         """Formata a legenda bibliográfica complexa"""
         city = None
@@ -263,35 +242,31 @@ class ArticlemetaIssueFormatter:
 
     def _format_article_info(self):
         """Informações de artigo"""
-        if self.article.exists():
-            article_count = str(self.obj.article_set.count()) 
+        article_count = self.obj.article_set.count()
+        if article_count:
             add_to_result("v122", article_count, self.result['issue'])
 
     def _format_issn_info(self):
         """Informações de edição"""
-        if self.scielo_journal:
-            issn_print = self.scielo_journal.journal.official.issn_print
-            issn_electronic = self.scielo_journal.journal.official.issn_electronic
-            issn_scielo = self.scielo_journal.issn_scielo
-            add_multiple_to_result(
-                {
-                    "v35": issn_scielo,
-                    "v935": issn_electronic,
-                },
-                self.result['issue']
-            )
-            
-            self._format_issn_with_type(issn_print, issn_electronic)
-            self._format_issn_code_title(issn_print, issn_electronic)
-            self._format_code(issn_scielo)
+        issn_print = self.journal.official.issn_print
+        issn_electronic = self.journal.official.issn_electronic
+        add_multiple_to_result(
+            {
+                "v35": self.journal_pid,
+                "v935": issn_electronic,
+            },
+            self.result['issue']
+        )
+        
+        self._format_issn_with_type(issn_print, issn_electronic)
+        self._format_issn_code_title(issn_print, issn_electronic)
+        self._format_code()
     
-    def _format_code(self, issn_scielo):
-        """Informações de código"""
-        if self.obj.year and self.obj.order:
-            code = f"{issn_scielo}{self.obj.year}{self.obj.issue_pid_suffix}"
-            self.result['code'] = code    
-            self.result['issue']['code'] = code
-            add_to_result("v880", code, self.result['issue'])
+    def _format_code(self):
+        code = self.issue_pid
+        self.result['code'] = code    
+        self.result['issue']['code'] = code
+        add_to_result("v880", code, self.result['issue'])
 
     def _format_issn_with_type(self, issn_print, issn_electronic):
         """Informações de ISSN com tipo"""
@@ -325,11 +300,9 @@ class ArticlemetaIssueFormatter:
         if data:
             self.result['issue']['v49'] = data
 
+
 def get_articlemeta_format_issue(obj, collection):
     """
     Converte issue para formato ArticleMeta
     """
-    formatter_issue = ArticlemetaIssueFormatter(obj, collection).format()
-    formatter_journal = ArticlemetaJournalFormatter(obj.journal, collection).format()
-    formatter_issue['title'] = formatter_journal
-    return formatter_issue
+    return ArticlemetaIssueFormatter(obj, collection).format()

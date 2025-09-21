@@ -11,7 +11,13 @@ from collection.models import Collection
 from config import celery_app
 from core.utils.rename_dictionary_keys import rename_dictionary_keys
 from core.utils.utils import fetch_data, _get_user
-from journal import controller
+from journal.am_export import articlemeta_exporter
+from journal.am_import.am_data_extraction import extract_value
+from journal.am_import.am_field_names import correspondencia_journal
+from journal.am_import.articlemeta import (
+    _register_journal_data,
+    process_journal_article_meta,
+)
 from journal.models import (
     AMJournal,
     Journal,
@@ -19,24 +25,11 @@ from journal.models import (
     JournalLogo,
     SciELOJournal,
 )
-from journal.sources import classic_website
-from journal.sources.am_data_extraction import extract_value
-from journal.sources.am_field_names import correspondencia_journal
-from journal.sources.article_meta import (
-    _register_journal_data,
-    process_journal_article_meta,
-)
 from tracker.models import UnexpectedEvent
 
 User = get_user_model()
 
 logger = logging.getLogger(__name__)
-
-
-@celery_app.task(bind=True)
-def load_journal_from_classic_website(self, username=None, user_id=None):
-    user = _get_user(self.request, username=username, user_id=user_id)
-    classic_website.load(user)
 
 
 @celery_app.task(bind=True)
@@ -286,7 +279,8 @@ def child_load_license_of_use_in_journal(
 @celery_app.task(bind=True, name="task_export_journals_to_articlemeta")
 def task_export_journals_to_articlemeta(
     self,
-    collections=[],
+    collection_acron_list=None,
+    journal_acron_list=None,
     from_date=None,
     until_date=None,
     days_to_go_back=None,
@@ -304,15 +298,17 @@ def task_export_journals_to_articlemeta(
         username: Username for authentication
     """
     user = _get_user(self.request, username=username, user_id=user_id)
+    destination = ExportDestination.get_or_create("articlemeta", user)
 
-    return controller.bulk_export_journals_to_articlemeta(
-        collections=collections,
+    return articlemeta_exporter.bulk_export_journals_to_articlemeta(
+        user,
+        destination,
+        collection_acron_list=collection_acron_list,
+        journal_acron_list=journal_acron_list,
         from_date=from_date,
         until_date=until_date,
         days_to_go_back=days_to_go_back,
         force_update=force_update,
-        user=user,
-        client=None,
     )
 
 
@@ -328,8 +324,9 @@ def task_export_journal_to_articlemeta(self, issn=None, force_update=True, user_
         username: Username for authentication
     """
     user = _get_user(self.request, username=username, user_id=user_id)
+    destination = ExportDestination.get_or_create("articlemeta", user)
 
-    return controller.export_journal_to_articlemeta(
+    return articlemeta_exporter.export_journal_to_articlemeta(
         issn=issn,
         force_update=force_update,
         user=user,

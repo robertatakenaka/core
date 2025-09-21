@@ -16,6 +16,7 @@ from wagtail_modeladmin.options import ModelAdmin
 from config.menu import get_menu_order
 from config.settings.base import COLLECTION_TEAM, JOURNAL_TEAM
 from journalpage.models import JournalPage
+from journal.models import AMJournal, SciELOJournalExport
 
 from . import models
 from .button_helper import IndexedAtHelper
@@ -62,37 +63,12 @@ class OfficialJournalSnippetViewSet(SnippetViewSet):
     )
 
 
-class JournalExportCreateView(CreateView):
-    def form_valid(self, form):
-        self.object = form.save_all(self.request.user)
-        return HttpResponseRedirect(self.get_success_url())
-    
-
-class JournalExportSnippetViewSet(SnippetViewSet):
-    model = models.SciELOJournalExport
-    inspect_view_enabled = True
-    add_view_class = JournalExportCreateView
-    menu_label = _("Journal Export")
-    menu_icon = "folder"
-    menu_order = 300
-    add_to_settings_menu = False
-    exclude_from_explorer = False
-
-    list_display = (
-        "collection",
-        "scielo_journal",
-        "export_type",
-        "created",
-        "updated",
-    )
-    list_filter = (
-        "collection",
-        "export_type",
-    )
-    search_fields = (
-        "scielo_journal__title",
-        "collection__acron3",
-    )
+@register_snippet
+class JournalExportViewSet(BaseExportViewSet):
+    model = SciELOJournalExport
+    icon = "folder-open-1"
+    menu_label = _("Journal Exports")
+    search_fields = ["scielo_journal__issn_scielo"]
 
 
 class JournalCreateView(CreateView):
@@ -245,24 +221,6 @@ class SciELOJournalAdminViewSet(SnippetViewSet):
         return qs
 
 
-class JournalSnippetViewSetGroup(SnippetViewSetGroup):
-    menu_label = _("Journals")
-    menu_icon = "folder-open-inverse"
-    menu_order = get_menu_order("journal")
-    items = (
-        OfficialJournalSnippetViewSet,
-        JournalAdminSnippetViewSet,
-        SciELOJournalAdminViewSet,
-        JournalAdminEditorSnippetViewSet,
-        JournalExportSnippetViewSet,
-        JournalAdminPolicySnippetViewSet,
-        JournalAdminInstructionsForAuthorsSnippetViewSet,
-    )
-
-
-register_snippet(JournalSnippetViewSetGroup)
-
-
 class TOCSectionAdmin(ModelAdmin):
     model = models.JournalTocSection
     menu_label = "Table of Contents"
@@ -384,7 +342,7 @@ class StandardAdmin(ModelAdmin):
 # TODO
 # Futuramente mudar para JournalAdminGroup
 # com permissoes de visualizacao restrita
-class AMJournalAdmin(ModelAdmin):
+class AMJournalAdminViewSet(SnippetViewSet):
     model = models.AMJournal
     menu_label = "AM Journal"
     menu_icon = "folder"
@@ -460,3 +418,22 @@ def register_ctf_permissions_2():
     model = JournalProxyPanelInstructionsForAuthors
     content_type = ContentType.objects.get_for_model(model, for_concrete_model=False)
     return Permission.objects.filter(content_type=content_type)
+
+
+class JournalSnippetViewSetGroup(SnippetViewSetGroup):
+    menu_label = _("Journals")
+    menu_icon = "folder-open-inverse"
+    menu_order = get_menu_order("journal")
+    items = (
+        OfficialJournalSnippetViewSet,
+        JournalAdminSnippetViewSet,
+        SciELOJournalAdminViewSet,
+        JournalAdminEditorSnippetViewSet,
+        JournalExportViewSet,
+        JournalAdminPolicySnippetViewSet,
+        JournalAdminInstructionsForAuthorsSnippetViewSet,
+        AMJournalAdminViewSet,
+    )
+
+
+register_snippet(JournalSnippetViewSetGroup)

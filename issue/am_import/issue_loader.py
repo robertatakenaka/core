@@ -4,10 +4,10 @@ import sys
 from django.db import IntegrityError, transaction
 
 from core.models import Language
-from journal.models import SciELOJournal
+from core.utils.rename_dictionary_keys import rename_issue_dictionary_keys
+from issue.am_import.correspondencia import correspondencia_issue
+from issue.models.models import CodeSectionIssue, Issue, SectionIssue, TocSection
 from tracker.models import UnexpectedEvent
-
-from ..models import CodeSectionIssue, Issue, SectionIssue, TocSection
 
 
 def normalize_markup_done(markup_done):
@@ -21,29 +21,78 @@ def normalize_markup_done(markup_done):
     return markup_done
 
 
+def create_or_update_issue(
+    user,
+    issue_data: dict,
+    collection_acron: str,
+    issn: str
+):
+    """
+    Cria ou atualiza um Issue a partir dos dados do LegacyIssue.
+    """
+    issue_dict = rename_issue_dictionary_keys(
+        [issue_data], correspondencia_issue
+    )
+    issue_pid_suffix = issue_data.get("code")[9:]
+    issue = get_or_create_issue(
+        collection_acron3=collection_acron,
+        issn_scielo=issn,
+        volume=issue_dict.get("volume"),
+        number=issue_dict.get("number"),
+        supplement_volume=issue_dict.get("supplement_volume"),
+        supplement_number=issue_dict.get("supplement_number"),
+        data_iso=issue_dict.get("date_iso"),
+        sections_data=issue_dict.get("sections_data"),
+        markup_done=issue_dict.get("markup_done"),
+        user=user,
+        order=int(issue_pid_suffix),
+        issue_pid_suffix=issue_pid_suffix,
+        season=None,
+    )
+    # FIXME - faltam dados para importar do AM, como por exemplo bibliographic strip
+    return issue
+
+
 def get_or_create_issue(
+    collection_acron3,
     issn_scielo,
     volume,
     number,
-    data_iso,
     supplement_volume,
     supplement_number,
+    data_iso,
     sections_data,
     markup_done,
     user,
-    order=None,
-    issue_pid_suffix=None,    
+    order,
+    issue_pid_suffix,
+    force_update,
+    season,
 ):
-    scielo_journal = get_scielo_journal(issn_scielo)
+    issn_scielo = extract_value(issn_scielo)
+    volume = extract_value(volume)
+    number = extract_value(number)
     supplement = extract_value(supplement_number) or extract_value(supplement_volume)
+
+
+    if not force_update:
+        issue = Issue.select_issues(
+            collection_acron_list=[collection_acron3],
+            journal_pid_list=[issn_scielo],
+            volume=volume,
+            number=number,
+            supplement=supplement_volume or supplement_number,
+        ).first()
+        if issue:
+            return issue
+
     data = extract_value(data_iso)
-    
     markup_done = normalize_markup_done(markup_done)
 
     obj = Issue.get_or_create(
         journal=scielo_journal.journal,
-        volume=extract_value(volume),
-        number=extract_value(number),
+        volume=volume,
+        number=number,
         supplement=supplement,
         year=data[:4],
         month=data[4:6],
@@ -52,23 +101,12 @@ def get_or_create_issue(
         order=order,
         issue_pid_suffix=issue_pid_suffix,
         user=user,
-        season=None,
+        season=season,
     )
     data_code_sections = get_or_create_code_sections(sections_data, user)
     for section in data_code_sections:
         obj.code_sections.add(section)
-
     return obj
-
-def get_scielo_journal(issn_scielo):
-    try:
-        issn_scielo = extract_value(issn_scielo)
-        return SciELOJournal.objects.get(issn_scielo=issn_scielo)
-    except SciELOJournal.DoesNotExist:
-        logging.exception(f"Nenhum SciELOJournal encontrado com ISSN: {issn_scielo}")
-        return None
-    except SciELOJournal.MultipleObjectsReturned:
-        return SciELOJournal.objects.filter(issn_scielo=issn_scielo).first()
 
 
 def extract_date(date):

@@ -11,10 +11,9 @@ from freezegun import freeze_time
 
 from article.models import Article
 from article.tasks import (
-    get_researcher_identifier_unnormalized,
     migrate_path_xml_pid_provider_to_pid_provider,
     normalize_stored_email,
-    remove_duplicate_articles,
+    task_remove_duplicate_articles,
 )
 from researcher.models import ResearcherIdentifier
 
@@ -35,7 +34,7 @@ class RemoveDuplicateArticlesTest(TestCase):
         self.create_article_at_time("2023-01-01", "pid1")
         self.create_article_at_time("2023-01-02", "pid1")
         self.create_article_at_time("2023-01-03", "pid1")
-        remove_duplicate_articles()
+        task_remove_duplicate_articles()
         self.assertEqual(Article.objects.all().count(), 1)
         self.assertEqual(
             Article.objects.all()[0].created, make_aware(datetime(2023, 1, 1))
@@ -43,7 +42,7 @@ class RemoveDuplicateArticlesTest(TestCase):
 
     def test_no_removal_if_only_one_article(self):
         self.create_article_at_time("2023-01-01", "pid1")
-        remove_duplicate_articles()
+        task_remove_duplicate_articles()
         self.assertEqual(Article.objects.all().count(), 1)
         self.assertEqual(
             Article.objects.all()[0].created, make_aware(datetime(2023, 1, 1))
@@ -54,7 +53,7 @@ class RemoveDuplicateArticlesTest(TestCase):
         self.create_article_at_time("2022-06-04", "pid2")
         self.create_article_at_time("2022-07-08", "pid3")
         self.create_article_at_time("2022-06-14", "pid3")
-        remove_duplicate_articles()
+        task_remove_duplicate_articles()
         self.assertEqual(Article.objects.filter(pid_v3="pid2").count(), 1)
         self.assertEqual(Article.objects.filter(pid_v3="pid3").count(), 1)
         self.assertEqual(
@@ -100,7 +99,7 @@ class NormalizeEmailResearcherIdentifierTest(TestCase):
         )
 
     def test_normalize_stored_email(self):
-        unnormalized_identifiers = get_researcher_identifier_unnormalized()
+        unnormalized_identifiers = ResearcherIdentifier.get_items_with_invalid_email()
         self.assertEqual(6, unnormalized_identifiers.count())
 
         normalize_stored_email()

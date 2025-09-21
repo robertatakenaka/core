@@ -12,6 +12,7 @@ from journal.models import Standard, Subject, WebOfKnowledge, WebOfKnowledgeSubj
 from vocabulary.models import Vocabulary
 from thematic_areas.models import ThematicArea
 from bigbang.utils.scheduler import schedule_task
+from bigbang import tasks_scheduler
 from tracker.models import UnexpectedEvent
 
 
@@ -63,20 +64,11 @@ def task_start(
 
 
 @celery_app.task(bind=True)
-def task_create_tasks(self, user_id, tasks_data):
-    for task_data in tasks_data:
-        # {
-        #     'task': 'pid_provider.tasks.provide_pid_for_am_xmls',
-        #     'name': 'provide_pid_for_am_xmls',
-        #     'kwargs': {'username': 'adm'},
-        #     'description': 'Atribui pid para os artigos provenientes do AM',
-        #     'priority': 1,
-        #     'enabled': True,
-        #     'run_once': False,
-        #     'day_of_week': '4',
-        #     'hour': '2',
-        #     'minute': '1'},
-        try:
-            schedule_task(**task_data)
-        except Exception as e:
-            logging.exception(e)
+def task_create_tasks(
+    self,
+    user_id=None,
+    username=None,
+    enable=False,
+):
+    tasks_scheduler.delete_outdated_tasks()
+    tasks_scheduler.schedule_tasks(username)

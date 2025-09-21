@@ -1,16 +1,19 @@
 import csv
 import os
+from datetime import datetime
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, models
 from django.db.models import Case, IntegerField, Value, When
 from django.utils.html import strip_tags
 from django.utils.translation import gettext_lazy as _
-from wagtail.admin.panels import FieldPanel
+from wagtail.admin.panels import FieldPanel, ObjectList, TabbedInterface
 from wagtail.fields import RichTextField
+from wagtail.models import ClusterableModel
 from wagtail.search import index
 from wagtail.snippets.models import register_snippet
 from wagtailautocomplete.edit_handlers import AutocompletePanel
+
 
 from . import choices
 from .utils.utils import language_iso
@@ -173,6 +176,14 @@ class Language(CommonControlField):
             for k, v in choices.LANGUAGE:
                 cls.get_or_create(name=v, code2=k, creator=user)
 
+    @staticmethod
+    def get_instance(language):
+        if not language:
+            return
+        if isinstance(language, Language):
+            return language
+        return Language.get(language)
+
     @classmethod
     def get_or_create(cls, name=None, code2=None, creator=None):
         code2 = language_iso(code2)
@@ -195,6 +206,15 @@ class Language(CommonControlField):
             obj.creator = creator
             obj.save()
             return obj
+
+    @classmethod
+    def get(cls, code2):
+        if not code2:
+            raise ValueError("Language.get requires params: code2")
+        try:
+            return cls.objects.get(code2=code2)
+        except cls.DoesNotExist:
+            return cls.objects.get(code2=language_iso(code2))
 
 
 class TextWithLang(models.Model):
@@ -679,3 +699,203 @@ class SocialNetwork(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class ExportDestination(CommonControlField):
+    acronym = models.CharField(_("Acronym"), max_length=30, null=True, blank=False)
+
+    panels = [
+        FieldPanel("acronym"),
+    ]
+
+    base_form_class = CoreAdminModelForm
+    autocomplete_search_field = "acronym"
+
+    def autocomplete_label(self):
+        return str(self)
+
+    def __str__(self):
+        return f"{self.acronym}"
+
+    class Meta:
+        ordering = ["acronym"]
+
+    @classmethod
+    def get_or_create(cls, destination_name, user=None):
+        """Obtém o destino de exportação."""
+        try:
+            return cls.objects.get(acronym=destination_name)
+        except cls.MultipleObjectReturned:
+            return cls.objects.filter(acronym=destination_name).first()
+        except cls.DoesNotExist:
+            obj = cls()
+            obj.acronym = destination_name
+            obj.creator = user
+            obj.save()
+            return obj
+
+
+class BaseExport(CommonControlField, ClusterableModel):
+    """
+    Classe base abstrata para controle de exportações
+    """
+    pid = models.CharField(
+        _("PID"),
+        max_length=24,
+        db_index=True,
+        verbose_name=_("Parent Identifier")
+    )
+    destination = models.ForeignKey(
+        ExportDestination,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        verbose_name=_("Destination")
+    )
+    status = models.CharField(
+        _("Status"),
+        max_length=15,
+        null=True,
+        blank=True,
+        choices=choices.EXPORTATION_STATUS,
+        default=choices.EXPORTATION_STATUS_TODO,
+    )
+    collection = models.ForeignKey(
+        'collection.Collection',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        verbose_name=_("Collection")
+    )
+    detail = models.JSONField(null=True, blank=True)
+    # se preencher, vai gerar histórico, se nunca preencher não mantém histórico
+    version = models.CharField(_("Version"), max_length=26, null=True, blank=True)
+
+    class Meta:
+        abstract = True
+        indexes = [
+            models.Index(fields=['pid', 'destination', 'collection']),
+        ]
+
+    @classmethod
+    def get_panels(cls):
+        """
+        Retorna os panels do Wagtail para a interface administrativa.
+        """
+        panels_ids = [
+            FieldPanel("pid", read_only=True),
+            FieldPanel("collection", read_only=True),        
+            FieldPanel("destination", read_only=True),
+            FieldPanel("created", read_only=True),
+            FieldPanel("updated", read_only=True),
+        ]
+        
+        panels_events = [
+            FieldPanel("status", read_only=True),
+            FieldPanel("detail", read_only=True),
+        ]
+        
+        return TabbedInterface(
+            [
+                ObjectList(panels_ids, heading=_("Identification")),
+                ObjectList(panels_events, heading=_("Events")),
+            ]
+        )
+
+    @classmethod
+    def start(cls, user, parent, pid, destination, collection, version=None):
+        """
+        Marca um objeto como exportado
+        
+        Args:
+            user: Usuário realizando a exportação
+            parent: Objeto pai sendo exportado
+            pid: Identificador único do objeto pai
+            destination: Destino da exportação
+            collection: Coleção
+            version: Versão (opcional)
+        """
+        filter_kwargs = {
+            "pid": pid,
+            "destination": destination,
+            "collection": collection,
+            "version": version,
+        }
+        
+        defaults = {
+            "creator": user,
+            "parent": parent
+        }
+        
+        obj, created = cls.objects.get_or_create(
+            **filter_kwargs,
+            defaults=defaults
+        )
+        
+        if not created:
+            obj.updated = datetime.now()
+            obj.updated_by = user
+            obj.parent = parent
+            
+        obj.status = choices.EXPORTATION_STATUS_TODO
+        obj.save()
+        return obj
+
+    def finish(self, user, completed, events, errors=None, exceptions=None):
+        """Finaliza uma exportação com status e detalhes"""
+        if errors or exceptions:
+            completed = False
+        if completed:
+            self.status = choices.EXPORTATION_STATUS_DONE
+        detail = self.detail or {}
+        if events:
+            detail["events"] = events
+        if errors:
+            detail["errors"] = errors
+        if exceptions:
+            detail["exceptions"] = exceptions
+        self.detail = detail
+        self.updated = datetime.now()
+        self.updated_by = user
+        self.save()
+
+    @classmethod
+    def is_exported(cls, parent, pid, destination, collection):
+        """
+        Verifica se um objeto já foi exportado
+        
+        Args:
+            parent: Objeto pai sendo verificado
+            pid: Identificador único do objeto pai
+            destination: Destino da exportação
+            collection: Coleção
+        """
+        filter_kwargs = {
+            "pid": pid,
+            "destination": destination,
+            "collection": collection,
+        }
+        
+        last_export = cls.objects.filter(**filter_kwargs).order_by("-updated").first()
+        return last_export and last_export.status == choices.EXPORTATION_STATUS_DONE
+
+    @classmethod
+    def get_demand(cls, user, parent, destination, pid, collection, version, force_update=None):
+        """
+        Exporta um objeto para uma única coleção.
+        
+        Args:
+            user: Usuário realizando a exportação
+            parent: Objeto pai sendo exportado
+            destination: Destino da exportação
+            pid: Identificador único do objeto pai
+            collection: Coleção
+            version: Versão
+            force_update: Forçar atualização mesmo se já exportado
+        """
+        if force_update:
+            version = datetime.utcnow().isoformat()
+            return cls.start(user, parent, pid, destination, collection, version)
+        if not cls.is_exported(parent, pid, destination, collection):
+            version = datetime.utcnow().isoformat()
+            return cls.start(user, parent, pid, destination, collection, version)

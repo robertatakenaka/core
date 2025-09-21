@@ -71,32 +71,13 @@ class ArticleAdmin(ModelAdmin):
     )
 
 
-class ArticleExportCreateView(CreateView):
-    def form_valid(self, form):
-        self.object = form.save_all(self.request.user)
-        return HttpResponseRedirect(self.get_success_url())
-
-
-class ArticleExportAdmin(ModelAdmin):
+@register_snippet
+class ArticleExportViewSet(BaseExportViewSet):
     model = ArticleExport
-    create_view_class = ArticleExportCreateView
-    menu_label = _("Article Export")
-    menu_icon = "folder"
-    menu_order = 100
-    add_to_settings_menu = False
-    exclude_from_explorer = False
+    icon = "doc-full"
+    menu_label = _("Article Exports")
+    search_fields = ["article__sps_pkg_name"]
 
-    list_display = ("article", "pid_v3", "export_type", "created", "updated")
-    list_filter = (
-        "collection",
-        "export_type",
-    )
-    search_fields = ("article__pid_v3", "article__sps_pkg_name")
-
-    def pid_v3(self, obj):
-        return obj.article.pid_v3
-
-    pid_v3.short_description = "PID_V3"
 
 
 class ArticleFormatCreateView(CreateView):
@@ -157,13 +138,20 @@ class ArticleFundingAdmin(ModelAdmin):
     )
 
 
+
 class ArticleAdminGroup(ModelAdminGroup):
     menu_label = _("Articles")
     menu_icon = "folder-open-inverse"  # change as required
     menu_order = get_menu_order(
         "article"
     )  # will put in 3rd place (000 being 1st, 100 2nd)
-    items = (ArticleAdmin, ArticleExportAdmin, ArticleFormatAdmin, ArticleFundingAdmin)
+    items = (
+        ArticleAdmin,
+        ArticleExportDestinationModelAdmin,
+        ArticleExportAdmin,
+        ArticleFormatAdmin,
+        ArticleFundingAdmin,
+    )
 
 
 modeladmin_register(ArticleAdminGroup)

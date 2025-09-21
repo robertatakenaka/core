@@ -2,34 +2,21 @@ from collections import defaultdict
 from functools import lru_cache
 
 from core.utils.articlemeta_dict_utils import add_items, add_to_result
-from journal.models import SciELOJournal, TitleInDatabase
 
 
 class ArticlemetaJournalFormatter:
     """Formatador para dados do ArticleMeta"""
     
-    def __init__(self, obj, collection):
+    def __init__(self, obj, collection, scielo_journal):
         self.obj = obj
         self.collection = collection
         self.result = defaultdict(list)
-        self._scielo_journal = None
+        self.scielo_journal = scielo_journal
         self._publisher_history = None
         self._medline_titles = None
         self._copyright_holder_history = None
         self._sponsor_history = None
         self.official = getattr(self.obj, 'official', None)
-
-    @property
-    def scielo_journal(self):
-        if self._scielo_journal is not None:
-            return self._scielo_journal
-
-        qs = SciELOJournal.objects.select_related('collection', 'journal').filter(journal=self.obj)
-        if self.collection:
-            qs = qs.filter(collection__acron3=self.collection)
-
-        self._scielo_journal = qs.first()
-        return self._scielo_journal
     
     @property
     def publisher_history(self):
@@ -57,12 +44,23 @@ class ArticlemetaJournalFormatter:
 
     @property
     @lru_cache(maxsize=1)
-    def titles_in_database_medline_secs(self):
-        titles_in_db = TitleInDatabase.objects.filter(
-                journal=self.obj,
-                indexed_at__acronym__in=["medline", "secs"]
-            ).select_related("indexed_at")
-        return titles_in_db
+    def get_journal_data_from_medline(self):
+        try:
+            return self.title_in_database.get(
+                indexed_at__acronym="medline",
+            ).data
+        except Exception as e:
+            return {}
+
+    @property
+    @lru_cache(maxsize=1)
+    def get_journal_data_from_secs(self):
+        try:
+            return self.title_in_database.get(
+                indexed_at__acronym="secs",
+            ).data
+        except Exception as e:
+            return {}
 
     def format(self):
         """Formata todos os dados do journal"""
@@ -147,13 +145,12 @@ class ArticlemetaJournalFormatter:
             add_to_result("v710", title, self.result)
 
     def _format_collection_info(self):
-        if self.scielo_journal and self.scielo_journal.collection:
-            collection = self.scielo_journal.collection
-            if collection:
-                acron3 = collection.acron3
-                self.result["collection"] = acron3
-                add_to_result("v690", collection.domain, self.result)
-                add_to_result("v992", collection.acron3, self.result)
+        collection = self.collection
+        if collection:
+            acron3 = collection.acron3
+            self.result["collection"] = acron3
+            add_to_result("v690", collection.domain, self.result)
+            add_to_result("v992", collection.acron3, self.result)
 
     def _format_scielo_journal_info(self):
         """Informações do SciELO Journal"""
@@ -212,18 +209,24 @@ class ArticlemetaJournalFormatter:
 
     def _format_indexing_info(self):
         """Informações de indexação"""
-        # secs codes
-        titles_in_db = self.titles_in_database_medline_secs
-        medline_data = [t for t in titles_in_db if t.indexed_at.acronym.lower() == "medline"]
-        secs_data = [t for t in titles_in_db if t.indexed_at.acronym.lower() == "secs"]
-        add_items("v37", [sc.identifier for sc in secs_data if sc.identifier], self.result)
-        title_medline = [m.title for m in medline_data]
-        add_items("v420", [m.identifier for m in medline_data], self.result)
-        add_items("v421", title_medline, self.result)
+        external_journal_data = self.obj.get_journal_data_from_external_databases()
 
-        indexeds_standard = [idx.name for idx in self.obj.indexed_at.all()]
-        additional_indexed_at = [idx.name for idx in self.obj.additional_indexed_at.all()]
-        add_items("v450", indexeds_standard + additional_indexed_at, self.result)
+        data = external_journal_data.get("medline")
+        if data:
+            add_items("v420", [data.get("identifier")], self.result)
+            add_items("v421", [data.get("title")], self.result)
+
+        data = external_journal_data.get("secs")
+        if data:
+            add_items("v37", [data.get("identifier")], self.result)
+
+        db_list = [
+            idx.name for idx in self.obj.indexed_at.all()
+        ] + [
+            idx.name for idx in self.obj.additional_indexed_at.all()
+        ]
+        add_items("v450", db_list, self.result)
+
         self._format_wos_db_info()
         self._format_wos_area_info()
 
@@ -335,6 +338,6 @@ class ArticlemetaJournalFormatter:
 
             self.result["v51"] =  subfields
 
+
 def get_articlemeta_format_title(obj, collection):
-    formatter = ArticlemetaJournalFormatter(obj, collection)
-    return formatter.format()
+    return ArticlemetaJournalFormatter(obj, collection).format()

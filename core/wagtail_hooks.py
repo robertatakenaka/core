@@ -1,7 +1,10 @@
 """File: core/wagtail_hooks.py."""
 
 from django.templatetags.static import static
+from django.utils.translation import gettext_lazy as _
 from django.utils.html import format_html
+from wagtail.snippets.views.snippets import SnippetViewSet
+from wagtail.snippets.models import register_snippet
 from wagtail import hooks
 from wagtail.admin.navigation import get_site_for_user
 from wagtail.admin.site_summary import SummaryItem
@@ -154,3 +157,22 @@ def reorder_menu_items(request, menu_items):
 def remove_menu_items(request, menu_items):
     if not request.user.is_superuser:
         menu_items[:] = [item for item in menu_items if item.name not in ['documents', 'explorer', 'reports']]
+
+
+# ViewSet base genérico
+class BaseExportViewSet(SnippetViewSet):
+    """ViewSet base minimalista para exportações"""
+    add_to_admin_menu = True
+    list_display = ["id", "destination", "collection", "status", "updated"]
+    list_filter = ["status", "destination", "collection", "updated"]
+    ordering = ["-updated"]
+
+
+# Registros minimalistas
+@register_snippet
+class ExportDestinationViewSet(SnippetViewSet):
+    model = ExportDestination
+    icon = "globe"
+    menu_label = _("Export Destinations")
+    list_display = ["acronym", "updated"]
+    search_fields = ["acronym"]

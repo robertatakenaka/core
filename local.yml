@@ -17,12 +17,24 @@ services:
     volumes:
       - .:/app:z
       - tmp_csv_data:/tmp
+      - ../data/media:/app/core/media
     env_file:
       - ./.envs/.local/.django
       - ./.envs/.local/.postgres
     ports:
       - "8009:8000"
     command: /start
+
+  mongo:
+    image: mongo
+    container_name: scielo_core_local_mongo
+    restart: always
+    user: mongodb
+    hostname: mongo
+    volumes:
+      - ../scms_data/mongo:/data/db
+    ports:
+        - "27717:27017"
 
   solr:
     image: solr:9.3
