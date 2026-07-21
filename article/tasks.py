@@ -720,19 +720,34 @@ def task_dispatch_articles(
     proc_status_list=None,
     # --- ativa article ---
     data_status_list=None,
-    # --- ativa harvest (qualquer um) ---
+    # --- ativa harvest ---
     limit=None,
     timeout=None,
     opac_url=None,
+    harvest=False,
     # --- ativa article_source ---
     article_source_status_list=None,
 ):
     """
     Tarefa orquestradora que dispara processamento em lote de artigos.
 
-    Utiliza ArticleIteratorBuilder para selecionar artigos baseado em
-    múltiplos critérios e dispara task_process_article_pipeline para
-    cada item encontrado, permitindo processamento paralelo.
+    Instancia UM ArticleIteratorBuilder com os filtros comuns e escolhe
+    EXPLICITAMENTE e de forma EXCLUDENTE qual método (``from_pid_provider``,
+    ``from_article``, ``from_article_source`` ou ``from_harvest``) usar, com
+    base nos argumentos fornecidos. Apenas um iterador roda por chamada —
+    isso evita que o mesmo artigo/pp_xml_id seja selecionado (e despachado)
+    mais de uma vez na mesma execução.
+
+    Prioridade de seleção (primeiro argumento não-nulo/True vence):
+        1. proc_status_list           -> builder.from_pid_provider(...)
+        2. data_status_list           -> builder.from_article(...)
+        3. article_source_status_list -> builder.from_article_source(...)
+        4. harvest=True (ou limit/timeout/opac_url) -> builder.from_harvest()
+        5. nenhum informado           -> builder.from_pid_provider() (padrão)
+
+    Para rodar mais de uma fonte, disparar `task_dispatch_articles` mais de
+    uma vez (uma por fonte), em vez de combinar argumentos de fontes
+    diferentes na mesma chamada.
 
     Args:
         self: Instância da tarefa Celery
@@ -747,32 +762,31 @@ def task_dispatch_articles(
         force_update (bool, optional): Força reprocessamento
         export_to_articlemeta (bool): Exporta para ArticleMeta após processamento
         auto_solve_pid_conflict (bool, optional): Resolve conflitos de PID automaticamente
-        proc_status_list (list, optional): Status do pid_provider para filtro
-        data_status_list (list, optional): Status do article para filtro
-        limit (int, optional): Limite máximo de artigos a processar
-        timeout (int, optional): Timeout para operações HTTP
+        proc_status_list (list, optional): Ativa from_pid_provider com estes status
+        data_status_list (list, optional): Ativa from_article com estes status
+        limit (int, optional): Limite máximo de artigos a processar (harvest)
+        timeout (int, optional): Timeout para operações HTTP (harvest)
         opac_url (str, optional): URL base do OPAC para harvest
-        article_source_status_list (list, optional): Status do article_source para filtro
+        harvest (bool): Ativa from_harvest explicitamente
+        article_source_status_list (list, optional): Ativa from_article_source
 
     Returns:
-        dict: Resumo com contadores de dispatched/skipped
+        dict: Resumo com fonte usada e contadores de dispatched/skipped
 
     Examples:
-        # Processamento padrão por coleção
-        task_dispatch_articles.delay(collection_acron_list=["scl"])
-
-        # Múltiplas fontes simultaneamente
+        # Processamento a partir do pid_provider
         task_dispatch_articles.delay(
-            proc_status_list=["todo"],
-            data_status_list=["invalid"],
-            article_source_status_list=["error"],
-            limit=500
+            collection_acron_list=["scl"], proc_status_list=["todo"]
         )
 
+        # Harvest explícito
+        task_dispatch_articles.delay(collection_acron_list=["scl"], harvest=True)
+
     Notes:
-        - Ver ArticleIteratorBuilder para detalhes sobre iteradores ativados
-        - Cada artigo encontrado gera uma subtarefa independente
+        - Ver ArticleIteratorBuilder para detalhes sobre cada método.
+        - Cada artigo encontrado gera uma subtarefa independente.
     """
+    source = None
     try:
         user = _get_user(self.request, username=username, user_id=user_id)
 
@@ -784,9 +798,7 @@ def task_dispatch_articles(
             "auto_solve_pid_conflict": auto_solve_pid_conflict,
         }
 
-        dispatched = skipped = 0
-
-        for item_kwargs in controller.ArticleIteratorBuilder(
+        builder = controller.ArticleIteratorBuilder(
             user=user,
             collection_acron_list=collection_acron_list,
             journal_acron_list=journal_acron_list,
@@ -794,23 +806,47 @@ def task_dispatch_articles(
             until_pub_year=until_pub_year,
             from_date=from_date,
             until_date=until_date,
-            proc_status_list=proc_status_list,
-            data_status_list=data_status_list,
-            article_source_status_list=article_source_status_list,
+            force_update=force_update,
             limit=limit,
             timeout=timeout,
             opac_url=opac_url,
-            force_update=force_update,
-        ):
+        )
+
+        # --------------------------------------------------------------
+        # Seleção EXCLUSIVA da fonte/iterador — apenas um método é chamado.
+        # --------------------------------------------------------------
+        if proc_status_list is not None:
+            source = "pid_provider"
+            item_iterator = builder.from_pid_provider(proc_status_list=proc_status_list)
+        elif data_status_list is not None:
+            source = "article"
+            item_iterator = builder.from_article(data_status_list=data_status_list)
+        elif article_source_status_list is not None:
+            source = "article_source"
+            item_iterator = builder.from_article_source(
+                article_source_status_list=article_source_status_list
+            )
+        elif harvest or limit is not None or timeout is not None or opac_url is not None:
+            source = "harvest"
+            item_iterator = builder.from_harvest()
+        else:
+            # padrão: comportamento anterior quando nenhum critério é informado
+            source = "pid_provider"
+            item_iterator = builder.from_pid_provider()
+
+        dispatched = skipped = 0
+
+        for item_kwargs in item_iterator:
             if item_kwargs is None:
                 skipped += 1
                 continue
-            logging.info(f"Dispatching article with kwargs: {item_kwargs}")
+            logging.info(f"Dispatching article (source={source}) with kwargs: {item_kwargs}")
             task_process_article_pipeline.delay(**item_kwargs, **common_kwargs)
             dispatched += 1
 
         return {
             "status": "success",
+            "source": source,
             "dispatched": dispatched,
             "skipped": skipped,
         }
@@ -822,6 +858,7 @@ def task_dispatch_articles(
             exc_traceback=exc_traceback,
             detail={
                 "task": "task_dispatch_articles",
+                "source": source,
                 "collection_acron_list": collection_acron_list,
                 "journal_acron_list": journal_acron_list,
                 "from_pub_year": from_pub_year,
@@ -836,6 +873,7 @@ def task_dispatch_articles(
             },
         )
         raise
+
 
 @celery_app.task(bind=True)
 def task_process_article_pipeline(
@@ -857,6 +895,8 @@ def task_process_article_pipeline(
     version=None,
     user_id=None,
     username=None,
+    document=None,
+    is_public=None,
 ):
     """
     Pipeline principal de processamento de artigos com múltiplos pontos de entrada.
@@ -903,7 +943,8 @@ def task_process_article_pipeline(
             xml_url="http://example.com/article.xml",
             collection_acron="scl", 
             pid="S1234-56782024000100001",
-            export_to_articlemeta=True
+            export_to_articlemeta=True,
+            is_public=None,
         )
 
         # A partir de ArticleSource existente
@@ -920,8 +961,12 @@ def task_process_article_pipeline(
     """
     try:
         user = _get_user(self.request, username=username, user_id=user_id)
-        
-        if xml_url:
+
+        article_source = None
+        if article_source_id:
+            article_source = ArticleSource.objects.get(id=article_source_id)
+
+        elif xml_url:
             if not collection_acron:
                 raise ValueError("collection_acron is required when xml_url is provided")
             if not pid:
@@ -938,20 +983,14 @@ def task_process_article_pipeline(
                 user=user,
                 url=xml_url,
                 source_date=source_date,
-                force_update=force_update,
                 am_article=am_article,
-                auto_solve_pid_conflict=auto_solve_pid_conflict,
-            )
-            pp_xml_id = article_source.pid_provider_xml.id
-        
-        if article_source_id:
-            article_source = ArticleSource.objects.get(id=article_source_id)
-            article_source.add_pid_provider(
-                user=user,
                 force_update=force_update,
                 auto_solve_pid_conflict=auto_solve_pid_conflict,
+                is_public=is_public,
             )
-            pp_xml_id = article_source.pid_provider_xml.id
+        
+        if article_source:
+            pp_xml_id = article_source.get_pid_provider_xml_id()
 
         if not pp_xml_id:
             raise ValueError(
