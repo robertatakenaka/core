@@ -399,34 +399,37 @@ def bulk_export_articles_to_articlemeta(
 
 class ArticleIteratorBuilder:
     """
-    Monta e encadeia iteradores de seleção de artigos para despacho ao pipeline.
+    Constrói iteradores de seleção de artigos para despacho ao pipeline
+    (``task_process_article_pipeline``).
 
-    Cada método ``_iter_from_*`` é um gerador que yields kwargs prontos para
-    ``task_process_article_pipeline``. Os iteradores ativos são determinados
-    pelos argumentos exclusivos presentes na instância — múltiplos podem estar
-    ativos simultaneamente.
+    O ``__init__`` guarda apenas os filtros COMUNS a mais de uma fonte
+    (usuário, coleção/periódico, intervalo de datas/anos, força de
+    atualização, parâmetros de harvest). Os filtros que são exclusivos de
+    uma única fonte (``proc_status_list``, ``data_status_list``,
+    ``article_source_status_list``) NÃO ficam no ``__init__`` — são passados
+    diretamente ao método correspondente, o que deixa explícito qual fonte
+    está sendo usada em cada chamada.
 
-    Argumentos exclusivos e seus iteradores:
+    Cada método ``from_*``:
+      - usa os atributos comuns já armazenados na instância;
+      - retorna um gerador independente que yields kwargs prontos para
+        ``task_process_article_pipeline``;
+      - representa exatamente UM ponto de entrada do pipeline.
 
-    ========================= ================================================
-    Argumento exclusivo        Iterador ativado
-    ========================= ================================================
-    proc_status_list           _iter_from_pid_provider
-    data_status_list           _iter_from_article
-    limit / timeout / opac_url _iter_from_harvest
-    article_source_status_list _iter_from_article_source
-    (nenhum)                   _iter_from_pid_provider (padrão)
-    ========================= ================================================
+    Mutuamente excludentes por construção: a classe não tem mais um
+    ``__iter__`` que decide sozinha quais iteradores ativar e os roda em
+    sequência. Quem chama (normalmente ``task_dispatch_articles``) escolhe
+    explicitamente UM método por execução. Isso elimina a possibilidade de
+    dois iteradores selecionarem o mesmo artigo/``pp_xml_id`` na mesma
+    chamada.
 
-    Usage::
+    Uso::
 
-        it = ArticleIteratorBuilder(
+        builder = ArticleIteratorBuilder(
             user=user,
             collection_acron_list=["scl"],
-            proc_status_list=["todo"],
-            data_status_list=["invalid"],
         )
-        for kwargs in it:
+        for kwargs in builder.from_pid_provider(proc_status_list=["todo"]):
             task_process_article_pipeline.delay(**kwargs)
     """
 
@@ -439,13 +442,10 @@ class ArticleIteratorBuilder:
         until_pub_year=None,
         from_date=None,
         until_date=None,
-        proc_status_list=None,
-        data_status_list=None,
-        article_source_status_list=None,
+        force_update=None,
         limit=None,
         timeout=None,
         opac_url=None,
-        force_update=None,
     ):
         self.user = user
         self.collection_acron_list = collection_acron_list
@@ -454,40 +454,21 @@ class ArticleIteratorBuilder:
         self.until_pub_year = until_pub_year
         self.from_date = from_date
         self.until_date = until_date
-        self.proc_status_list = proc_status_list
-        self.data_status_list = data_status_list
-        self.article_source_status_list = article_source_status_list
+        self.force_update = force_update
         self.limit = limit
         self.timeout = timeout
         self.opac_url = opac_url
-        self.force_update = force_update
-
-        self._iter_from_harvest_count = 0
-        self._iter_from_article_source_count = 0
-        self._iter_from_pid_provider_count = 0
-        self._iter_from_article_count = 0
-
-    def __iter__(self):
-        yield from self._iter_from_harvest()
-        yield from self._iter_from_article_source()
-        yield from self._iter_from_pid_provider()
-        yield from self._iter_from_article()
-
-        logging.info(f"Iterators summary: harvest={self._iter_from_harvest_count}, "
-                     f"article_source={self._iter_from_article_source_count}, "
-                     f"pid_provider={self._iter_from_pid_provider_count}, "
-                     f"article={self._iter_from_article_count}")
 
     # ------------------------------------------------------------------
-    # Iteradores de seleção
+    # from_pid_provider
     # ------------------------------------------------------------------
-
-    def _iter_from_pid_provider(self):
+    def from_pid_provider(self, proc_status_list=None):
         """Itera PidProviderXML filtrados por periódico, data e status."""
         journal_issn_groups = (
             Journal.get_journal_issns(self.collection_acron_list, self.journal_acron_list)
             or [None]
         )
+        count = 0
         for journal_issns in journal_issn_groups:
             issn_list = [i for i in journal_issns if i] if journal_issns else None
             if journal_issns and not issn_list:
@@ -498,20 +479,23 @@ class ArticleIteratorBuilder:
                 until_pub_year=self.until_pub_year,
                 from_updated_date=self.from_date,
                 until_updated_date=self.until_date,
-                proc_status_list=self.proc_status_list or [PPXML_STATUS_TODO, PPXML_STATUS_INVALID],
+                proc_status_list=proc_status_list or [PPXML_STATUS_TODO, PPXML_STATUS_INVALID],
             )
-            self._iter_from_pid_provider_count += qs.count()
+            count += qs.count()
             for item in qs.iterator():
                 yield {"pp_xml_id": item.id}
-        logging.info(f"_iter_from_pid_provider: yielded {self._iter_from_pid_provider_count} items")
+        logging.info(f"from_pid_provider: yielded {count} items")
 
-    def _iter_from_article(self):
+    # ------------------------------------------------------------------
+    # from_article
+    # ------------------------------------------------------------------
+    def from_article(self, data_status_list=None):
         """
         Itera Articles filtrados por data_status.
         Yields None para artigos sem pp_xml recuperável (sinaliza skip).
         """
         filters = {
-            "data_status__in": self.data_status_list or [
+            "data_status__in": data_status_list or [
                 choices.DATA_STATUS_PENDING,
                 choices.DATA_STATUS_UNDEF,
                 choices.DATA_STATUS_INVALID,
@@ -533,7 +517,7 @@ class ArticleIteratorBuilder:
             filters["updated__lte"] = self.until_date
 
         articles = Article.objects.filter(**filters)
-        self._iter_from_article_count += articles.count()
+        count = articles.count()
         for article in articles.iterator():
             if not article.pp_xml:
                 try:
@@ -544,19 +528,19 @@ class ArticleIteratorBuilder:
                     yield None
                     continue
             yield {"pp_xml_id": article.pp_xml.id}
-        logging.info(f"_iter_from_article: yielded {self._iter_from_article_count} articles")
+        logging.info(f"from_article: yielded {count} articles")
 
-    def _iter_from_harvest(self):
+    # ------------------------------------------------------------------
+    # from_harvest
+    # ------------------------------------------------------------------
+    def from_harvest(self):
         """Itera documentos coletados via OPAC ou ArticleMeta."""
-
         if Collection.objects.count() == 0:
             Collection.load(self.user)
 
         count = 0
         for collection_acron in self.collection_acron_list or list(Collection.get_acronyms()):
-            logging.info(collection_acron)
             harvester = self._build_harvester(collection_acron)
-            logging.info(harvester)
             for document in harvester.harvest_documents():
                 count += 1
                 yield {
@@ -564,29 +548,29 @@ class ArticleIteratorBuilder:
                     "collection_acron": collection_acron,
                     "pid": document["pid_v2"],
                     "source_date": document.get("processing_date") or document.get("origin_date"),
+                    "is_public": document.get("is_public"),
                 }
-        
-        self._iter_from_harvest_count = count
-        logging.info(f"Harvest iterator yielded {count} documents")
+        logging.info(f"from_harvest: yielded {count} documents")
 
-    def _iter_from_article_source(self):
+    # ------------------------------------------------------------------
+    # from_article_source
+    # ------------------------------------------------------------------
+    def from_article_source(self, article_source_status_list=None):
         """Itera ArticleSources pendentes ou com erro."""
         count = 0
         for article_source in ArticleSource.get_queryset_to_complete_data(
             self.from_date,
             self.until_date,
             self.force_update,
-            self.article_source_status_list,
+            article_source_status_list,
         ):
             count += 1
             yield {"article_source_id": article_source.id}
-        self._iter_from_article_source_count += count
-        logging.info(f"ArticleSource iterator yielded {count} items")
+        logging.info(f"from_article_source: yielded {count} items")
 
     # ------------------------------------------------------------------
-    # Helpers privados
+    # Helper privado (usado apenas por from_harvest)
     # ------------------------------------------------------------------
-
     def _build_harvester(self, collection_acron):
         """Instancia o harvester adequado para a coleção."""
         kwargs = dict(
@@ -598,4 +582,3 @@ class ArticleIteratorBuilder:
         if collection_acron == "scl":
             return OPACHarvester(self.opac_url or "www.scielo.br", collection_acron, **kwargs)
         return AMHarvester("article", collection_acron, **kwargs)
-
