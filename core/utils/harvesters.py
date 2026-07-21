@@ -115,6 +115,7 @@ class AMHarvester:
                         "publication_year": item.get("processing_year"),
                         "url": url,
                         "source_type": "articlemeta",
+                        "is_public": True,
                         "metadata": {
                             "raw_data": item,
                             "harvested_at": datetime.utcnow().isoformat(),
@@ -150,6 +151,7 @@ class OPACHarvester:
         limit: int = 100,
         timeout: int = 5,
         verify: bool = False,
+        journal_acron: Optional[str] = None,
     ):
         """
         Inicializa o harvester do OPAC.
@@ -169,6 +171,7 @@ class OPACHarvester:
         self.limit = limit or 100
         self.timeout = timeout or 5
         self.verify = verify
+        self.journal_acron = journal_acron
 
     def harvest_documents(self) -> Generator[Dict[str, Any], None, None]:
         """
@@ -198,6 +201,8 @@ class OPACHarvester:
                     f"end_date={self.until_date}&begin_date={self.from_date}"
                     f"&limit={self.limit}&page={page}"
                 )
+                if self.journal_acron:
+                    url += f"&journal={self.journal_acron}"
 
                 logging.info(f"Fetching OPAC documents from: {url}")
 
@@ -221,6 +226,13 @@ class OPACHarvester:
                     if not pid_v3 or not item.get("journal_acronym"):
                         logging.warning(f"Invalid document data: {item}")
                         continue
+
+                    try:
+                        # o ideal seria is_public, mas foi usado 'status' que pode ter valor True, False
+                        is_public = item["status"]
+                    except KeyError:
+                        # None porque não se sabe se é True ou False
+                        is_public = None
 
                     # Constrói URL do XML
                     journal_acron = item["journal_acronym"]
@@ -246,6 +258,7 @@ class OPACHarvester:
                         "publication_year": publication_year,
                         "url": xml_url,
                         "source_type": "opac",
+                        "is_public": is_public,
                         "metadata": {
                             "aop_pid": item.get("aop_pid"),
                             "default_language": item.get("default_language"),
