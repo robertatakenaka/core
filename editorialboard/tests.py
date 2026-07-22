@@ -39,7 +39,7 @@ class EditorialBoardMemberTest(TestCase):
         self.organization = Organization.create_or_update(
             user=self.user,
             name="Name of institution",
-            acronym="Acronym of institution",
+            acronym="INSTITUTIONACRON",
             url="www.teste.com.br",
             location=self.location,
             institution_type_mec="outros",
