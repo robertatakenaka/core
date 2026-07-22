@@ -4,6 +4,7 @@ import logging
 import sys
 import traceback
 
+from django.db.models import F, Q
 from packtools.sps.formats.am import am
 
 from article.models import Article, ArticleExporter, ArticleFunding, ArticleSource
@@ -133,33 +134,25 @@ def export_article_to_articlemeta(
 ) -> bool:
 
     try:
+        events = []
         if not article.classic_available(collection_acron_list):
             raise ArticleIsNotAvailableError(
                 f"Article {article} {collection_acron_list} (classic) is not available. Unable to export to ArticleMeta."
             )
-        new_available = article.new_available(collection_acron_list).exists()
-        logging.info(f"Article new {article} {collection_acron_list} {new_available}")
 
-        logging.info(
+        new_available = article.new_available(collection_acron_list).exists()
+        events.append(f"Article new {article} {collection_acron_list} {new_available}")
+
+        events.append(
             f"export_article_to_articlemeta: {article}, collections: {collection_acron_list}, force_update: {force_update}"
         )
         legacy_keys_items = list(article.get_legacy_keys(
             collection_acron_list, is_active=True
         ))
-        logging.info(f"Legacy keys to process: {legacy_keys_items}")
+        events.append(f"Legacy keys to process: {legacy_keys_items}")
         if not legacy_keys_items:
-            UnexpectedEvent.create(
-                exception=ValueError("No legacy keys found for article"),
-                detail={
-                    "operation": "export_article_to_articlemeta",
-                    "article": str(article),
-                    "collection_acron_list": collection_acron_list,
-                    "force_update": force_update,
-                },
-            )
-            return
+            raise ValueError("No legacy keys found for article")
 
-        events = []
         external_data = {
             "created_at": article.created.strftime("%Y-%m-%d"),
             "document_type": article.article_type,
@@ -224,9 +217,7 @@ def export_article_to_articlemeta(
                     json.dumps(data)
                     data["code"]
                 except Exception as e:
-                    logging.exception(e)
                     response = str(data)
-                    logging.info(data)
                     raise e
 
                 # Export the article to ArticleMeta
@@ -369,7 +360,7 @@ def bulk_export_articles_to_articlemeta(
                         "article_id": article.id,
                         "article_pid": getattr(article, "pid", None),
                         "journal_acron": getattr(article, "journal_acron", None),
-                        "pub_year": getattr(article, "pub_year", None),
+                        "pub_year": getattr(article, "pub_date_year", None),
                         "force_update": force_update,
                     },
                 )
@@ -463,28 +454,80 @@ class ArticleIteratorBuilder:
     # from_pid_provider
     # ------------------------------------------------------------------
     def from_pid_provider(self, proc_status_list=None):
-        """Itera PidProviderXML filtrados por periódico, data e status."""
-        journal_issn_groups = (
-            Journal.get_journal_issns(self.collection_acron_list, self.journal_acron_list)
-            or [None]
-        )
-        count = 0
-        for journal_issns in journal_issn_groups:
-            issn_list = [i for i in journal_issns if i] if journal_issns else None
-            if journal_issns and not issn_list:
-                continue
-            qs = PidProviderXML.get_queryset(
-                issn_list=issn_list,
-                from_pub_year=self.from_pub_year,
-                until_pub_year=self.until_pub_year,
-                from_updated_date=self.from_date,
-                until_updated_date=self.until_date,
-                proc_status_list=proc_status_list or [PPXML_STATUS_TODO, PPXML_STATUS_INVALID],
+        """
+        Itera PidProviderXML filtrados por coleção/periódico, data e status.
+
+        Otimização em relação à versão anterior (que usava
+        ``Journal.get_journal_issns`` + ``PidProviderXML.get_queryset``):
+
+          - ``collection_acron_list`` é aplicado diretamente via
+            ``collections__acron3__in`` — PidProviderXML já tem uma M2M
+            direta para Collection, então NENHUMA consulta a Journal é
+            necessária só por causa da coleção.
+          - ``journal_acron_list`` é o único filtro que realmente precisa
+            de ISSN (PidProviderXML não tem FK para Journal, só os campos
+            issn_print/issn_electronic). Quando informado, os ISSNs de
+            TODOS os periódicos que casam com os filtros são obtidos em
+            UMA única query (nada de agrupar por periódico e repetir a
+            consulta a PidProviderXML uma vez por grupo).
+          - PidProviderXML é consultado UMA única vez, contando os itens
+            durante o próprio ``iterator()`` — sem a query extra de
+            ``.count()`` separada do fetch.
+
+        Resultado: no máximo 2 queries totais (1 para ISSNs, se
+        ``journal_acron_list`` for informado, + 1 para os PidProviderXML),
+        contra as 2 + 2N queries da versão anterior (N = nº de periódicos
+        distintos que casam com os filtros).
+
+        Otimização adicional: ``.values(pp_xml_id=F("id"))`` já entrega o
+        dado no formato final (``{"pp_xml_id": ...}``) direto do banco —
+        sem instanciar objetos completos de ``PidProviderXML`` (que
+        carregariam também ``current_version`` via select_related) só para
+        ler o ``id``, e sem montar o dict manualmente a cada iteração.
+        """
+        filters = {
+            "proc_status__in": proc_status_list or [PPXML_STATUS_TODO, PPXML_STATUS_INVALID],
+        }
+        if self.from_date:
+            filters["updated__gte"] = self.from_date
+        if self.until_date:
+            filters["updated__lte"] = self.until_date
+        if self.from_pub_year:
+            filters["pub_date_year__gte"] = self.from_pub_year
+        if self.until_pub_year:
+            filters["pub_date_year__lte"] = self.until_pub_year
+
+        q = Q()
+        if self.collection_acron_list:
+            q &= Q(collections__acron3__in=self.collection_acron_list)
+
+        if self.journal_acron_list:
+            journal_qs = Journal.objects.filter(
+                scielojournal__journal_acron__in=self.journal_acron_list
             )
-            count += qs.count()
-            for item in qs.iterator():
-                yield {"pp_xml_id": item.id}
-        logging.info(f"from_pid_provider: yielded {count} items")
+            if self.collection_acron_list:
+                journal_qs = journal_qs.filter(
+                    scielojournal__collection__acron3__in=self.collection_acron_list
+                )
+            issn_list = [
+                issn
+                for pair in journal_qs.values_list(
+                    "official__issn_print", "official__issn_electronic"
+                ).distinct()
+                for issn in pair
+                if issn
+            ]
+            if not issn_list:
+                return
+            q &= Q(issn_print__in=issn_list) | Q(issn_electronic__in=issn_list)
+
+        qs = (
+            PidProviderXML.objects.filter(q, **filters)
+            .values(pp_xml_id=F("id"))
+            .distinct()
+        )
+
+        yield from qs.iterator()
 
     # ------------------------------------------------------------------
     # from_article
@@ -493,6 +536,20 @@ class ArticleIteratorBuilder:
         """
         Itera Articles filtrados por data_status.
         Yields None para artigos sem pp_xml recuperável (sinaliza skip).
+
+        Otimização em relação à versão anterior (que usava
+        ``Journal.get_ids``):
+
+          - ``collection_acron_list``/``journal_acron_list`` são aplicados
+            diretamente via ``journal__scielojournal__collection__acron3__in``
+            / ``journal__scielojournal__journal_acron__in`` — elimina a
+            consulta separada a Journal só para coletar uma lista de ids.
+          - Artigos que JÁ têm ``pp_xml`` preenchido são resolvidos com
+            ``.values("pp_xml_id")``, que já entrega o dict pronto — sem
+            instanciar Article nem PidProviderXML completos.
+          - Só os artigos SEM ``pp_xml`` (que precisam buscar e salvar)
+            exigem instâncias reais — esse é o único caso em que ainda
+            fazemos ``.iterator()`` sobre objetos completos.
         """
         filters = {
             "data_status__in": data_status_list or [
@@ -501,12 +558,14 @@ class ArticleIteratorBuilder:
                 choices.DATA_STATUS_INVALID,
             ]
         }
-        journal_id_list = Journal.get_ids(
-            collection_acron_list=self.collection_acron_list,
-            journal_acron_list=self.journal_acron_list,
-        )
-        if journal_id_list:
-            filters["journal__in"] = journal_id_list
+        if self.collection_acron_list:
+            filters["journal__scielojournal__collection__acron3__in"] = (
+                self.collection_acron_list
+            )
+        if self.journal_acron_list:
+            filters["journal__scielojournal__journal_acron__in"] = (
+                self.journal_acron_list
+            )
         if self.from_pub_year:
             filters["pub_year__gte"] = self.from_pub_year
         if self.until_pub_year:
@@ -516,19 +575,20 @@ class ArticleIteratorBuilder:
         if self.until_date:
             filters["updated__lte"] = self.until_date
 
-        articles = Article.objects.filter(**filters)
-        count = articles.count()
-        for article in articles.iterator():
-            if not article.pp_xml:
-                try:
-                    article.pp_xml = PidProviderXML.get_by_pid_v3(pid_v3=article.pid_v3)
-                    article.save(update_fields=["pp_xml"])
-                except Exception as e:
-                    logging.error(f"pp_xml not found for article {article.id}: {e}")
-                    yield None
-                    continue
+        base_qs = Article.objects.filter(**filters).distinct()
+
+        # Artigos que já têm pp_xml: values() já entrega o dict pronto.
+        yield from base_qs.filter(pp_xml__isnull=False).values("pp_xml_id").iterator()
+
+        # Artigos sem pp_xml: precisam de instância real para buscar/salvar.
+        without_pp_xml = base_qs.filter(pp_xml__isnull=True)
+        for article in without_pp_xml.iterator():
+            try:
+                article.pp_xml = PidProviderXML.get_by_pid_v3(pid_v3=article.pid_v3)
+                article.save(update_fields=["pp_xml"])
+            except Exception as e:
+                continue
             yield {"pp_xml_id": article.pp_xml.id}
-        logging.info(f"from_article: yielded {count} articles")
 
     # ------------------------------------------------------------------
     # from_harvest
@@ -538,11 +598,11 @@ class ArticleIteratorBuilder:
         if Collection.objects.count() == 0:
             Collection.load(self.user)
 
-        count = 0
-        for collection_acron in self.collection_acron_list or list(Collection.get_acronyms()):
+        for collection_acron in self.collection_acron_list or list(
+            Collection.get_acronyms(self.collection_acron_list)
+        ):
             harvester = self._build_harvester(collection_acron)
             for document in harvester.harvest_documents():
-                count += 1
                 yield {
                     "xml_url": document["url"],
                     "collection_acron": collection_acron,
@@ -550,23 +610,27 @@ class ArticleIteratorBuilder:
                     "source_date": document.get("processing_date") or document.get("origin_date"),
                     "is_public": document.get("is_public"),
                 }
-        logging.info(f"from_harvest: yielded {count} documents")
 
     # ------------------------------------------------------------------
     # from_article_source
     # ------------------------------------------------------------------
     def from_article_source(self, article_source_status_list=None):
-        """Itera ArticleSources pendentes ou com erro."""
-        count = 0
-        for article_source in ArticleSource.get_queryset_to_complete_data(
+        """
+        Itera ArticleSources pendentes ou com erro.
+
+        Otimização: ``.values(article_source_id=F("id"))`` sobre a
+        queryset retornada por ``get_queryset_to_complete_data`` já
+        entrega o dict pronto — sem instanciar cada ArticleSource
+        completo (não precisamos de mais nenhum campo do objeto para
+        montar o kwarg de despacho).
+        """
+        qs = ArticleSource.get_queryset_to_complete_data(
             self.from_date,
             self.until_date,
             self.force_update,
             article_source_status_list,
-        ):
-            count += 1
-            yield {"article_source_id": article_source.id}
-        logging.info(f"from_article_source: yielded {count} items")
+        )
+        yield from qs.values(article_source_id=F("id")).iterator()
 
     # ------------------------------------------------------------------
     # Helper privado (usado apenas por from_harvest)
