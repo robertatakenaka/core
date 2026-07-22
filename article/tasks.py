@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.utils.translation import gettext_lazy as _
 
 from article import controller
+from article.controller import ArticleIteratorBuilder
 from article.models import Article, ArticleFormat, ArticleSource, AMArticle
 from article.sources.preprint import harvest_preprints
 from article.sources.xmlsps import load_article
@@ -128,7 +129,6 @@ def task_convert_xml_to_other_formats_for_articles(
         user = _get_user(self.request, username, user_id)
 
         for item in Article.objects.filter(sps_pkg_name__isnull=False).iterator():
-            logging.info(item.pid_v3)
             try:
                 convert_xml_to_other_formats.apply_async(
                     kwargs={
@@ -204,7 +204,6 @@ def convert_xml_to_other_formats(
         done = True
     except ArticleFormat.DoesNotExist:
         done = False
-    logging.info(f"Done {done}")
 
     if not done or force_update:
         ArticleFormat.generate_formats(user, article=article)
@@ -250,7 +249,7 @@ def transfer_license_statements_fk_to_article_license(
         if not instance.license and first.data:
             data = first.data
             instance.license = License.create_or_update(user, license_type=data.get("license_type"), version=data.get("license_version"))
-            
+
         if not instance.license:
             continue
         instance.updated_by = user
@@ -260,7 +259,6 @@ def transfer_license_statements_fk_to_article_license(
         Article.objects.bulk_update(
             articles_to_update, ["license", "updated_by"]
         )
-        logging.info("The license of model Articles have been updated")
 
 
 def get_researcher_identifier_unnormalized():
@@ -303,7 +301,6 @@ def normalize_stored_email(
         - Identifica e-mails com formato inválido usando regex
         - Aplica normalização através de extracts_normalized_email
         - Executa bulk_update para otimizar performance em lotes
-        - Registra logs de processamento
 
     Examples:
         # Executar normalização de e-mails
@@ -372,7 +369,6 @@ def task_export_articles_to_articlemeta(
     Side Effects:
         - Exporta múltiplos artigos para ArticleMeta
         - Atualiza status de exportação dos artigos
-        - Registra logs de processamento
         - Registra UnexpectedEvent em caso de erro
 
     Examples:
@@ -407,12 +403,12 @@ def task_export_articles_to_articlemeta(
             days_to_go_back=days_to_go_back,
             force_update=force_update,
         )
-        
+
         return result
-        
+
     except Exception as e:
         exc_type, exc_value, exc_traceback = sys.exc_info()
-        
+
         UnexpectedEvent.create(
             exception=e,
             exc_traceback=exc_traceback,
@@ -432,7 +428,7 @@ def task_export_articles_to_articlemeta(
                 "task_id": self.request.id if hasattr(self.request, 'id') else None,
             },
         )
-        
+
         # Re-raise para que o Celery possa tratar a exceção adequadamente
         raise
 
@@ -466,7 +462,6 @@ def task_export_article_to_articlemeta(
     Side Effects:
         - Exporta artigo específico para ArticleMeta
         - Atualiza status de exportação do artigo
-        - Registra logs de processamento
         - Registra UnexpectedEvent em caso de erro
 
     Raises:
@@ -798,7 +793,7 @@ def task_dispatch_articles(
             "auto_solve_pid_conflict": auto_solve_pid_conflict,
         }
 
-        builder = controller.ArticleIteratorBuilder(
+        builder = ArticleIteratorBuilder(
             user=user,
             collection_acron_list=collection_acron_list,
             journal_acron_list=journal_acron_list,
@@ -840,7 +835,6 @@ def task_dispatch_articles(
             if item_kwargs is None:
                 skipped += 1
                 continue
-            logging.info(f"Dispatching article (source={source}) with kwargs: {item_kwargs}")
             task_process_article_pipeline.delay(**item_kwargs, **common_kwargs)
             dispatched += 1
 
@@ -895,7 +889,6 @@ def task_process_article_pipeline(
     version=None,
     user_id=None,
     username=None,
-    document=None,
     is_public=None,
 ):
     """
@@ -988,7 +981,7 @@ def task_process_article_pipeline(
                 auto_solve_pid_conflict=auto_solve_pid_conflict,
                 is_public=is_public,
             )
-        
+
         if article_source:
             pp_xml_id = article_source.get_pid_provider_xml_id()
 
@@ -1006,7 +999,7 @@ def task_process_article_pipeline(
         pp_xml.collections.set(article.collections)
 
         article.check_availability(user, force_update=export_to_articlemeta or force_update)
-        
+
         if export_to_articlemeta:
             if not article.is_classic_public or not article.valid:
                 logging.warning(f"Article {article.pid_v3} is not valid or not public. Skipping export to ArticleMeta.")
