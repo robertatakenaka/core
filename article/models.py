@@ -447,8 +447,7 @@ class Article(
         try:
             return descriptive_format(**leg_dict)
         except Exception as ex:
-            logging.exception("Erro on article %s, error: %s" % (self.pid_v2, ex))
-            return ""
+            return str(leg_dict)
 
     @property
     def pub_date(self):
@@ -532,7 +531,6 @@ class Article(
         handle_multiple=True,
     ):
         try:
-            logging.info(f"create: {pid_v3} {sps_pkg_name}")
             obj = cls()
             obj.pid_v3 = pid_v3
             obj.sps_pkg_name = sps_pkg_name
@@ -554,7 +552,6 @@ class Article(
         sps_pkg_name=None,
         handle_multiple=False,
     ):
-        logging.info(f"Article.get_or_create: {user} {pid_v3} {sps_pkg_name}")
         try:
             return cls.get(
                 pid_v3=pid_v3,
@@ -761,7 +758,6 @@ class Article(
             params["collection"] = collection
         if collection_acron_list:
             params["collection__acron3__in"] = collection_acron_list
-        logging.info(f"get_availability {params}")
         return self.article_availability.filter(available=True, **params)
 
     def check_availability(self, user, force_update=False):
@@ -1827,9 +1823,6 @@ class ArticleSource(CommonControlField):
         is_public=None,
     ):
         try:
-            logging.info(
-                f"ArticleSource.create_or_update {url} {source_date} {am_article} {force_update}"
-            )
             obj = cls.get(url=url)
             changed = obj.update(
                 source_date,
@@ -1904,7 +1897,6 @@ class ArticleSource(CommonControlField):
         if not self.url:
             raise ValueError("URL is required")
 
-        logging.info(f"ArticleSource.request_xml for {self.url}")
         try:
             xml_with_pre = list(XMLWithPre.create(uri=self.url))[0]
             self.save_file(
@@ -1923,7 +1915,7 @@ class ArticleSource(CommonControlField):
         try:
             self.file.delete(save=False)
         except Exception as e:
-            logging.exception(e)
+            pass
         self.file.save(filename, ContentFile(content))
 
     # Métodos para controle de status
@@ -2879,6 +2871,17 @@ class ContribPerson(ResearchNameMixin, CommonControlField):
             parts.append(str(self.affiliation))
         return " - ".join(parts)
     
+    @property
+    def data(self):
+        return dict(
+            article=self.article,
+            declared_name=self.declared_name,
+            orcid=self.orcid,
+            given_names=self.given_names,
+            last_name=self.last_name,
+            suffix=self.suffix
+        )
+    
     def get_formatted_fullname(self, use_comma_separator=True, suffix_position="end"):
         """
         Get formatted full name from name components.
@@ -3020,7 +3023,7 @@ class ContribPerson(ResearchNameMixin, CommonControlField):
         
         if user:
             obj.creator = user
-        
+
         try:
             obj.save()
             return obj
@@ -3202,11 +3205,9 @@ class ContribPerson(ResearchNameMixin, CommonControlField):
                 user=user,
                 article=self.article
             )
-            # Save to persist the relationship before using it
-            self.save()
         
         # Add normalized affiliation to the ArticleAffiliation
-        self.affiliation.add_normalized_affiliation(
+        self.affiliation.set_normalized(
             user=user,
             organization=organization,
             location=location,
@@ -3214,7 +3215,6 @@ class ContribPerson(ResearchNameMixin, CommonControlField):
             level_2=level_2,
             level_3=level_3
         )
-        
         self.updated_by = user
         self.save()
         return self
@@ -3283,7 +3283,6 @@ class ArticleEvent(BaseEvent, CommonControlField, Orderable):
             obj.save()
             return obj
         except Exception as e:
-            logging.exception(f"Error creating ArticleEvent: {e}")
             raise EventSaveError(f"Unable to create article event: {e}")
 
 
