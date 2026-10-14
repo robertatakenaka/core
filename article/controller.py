@@ -343,12 +343,14 @@ class ArticleIteratorBuilder:
         ``task_process_article_pipeline``;
       - representa exatamente UM ponto de entrada do pipeline.
 
-    Mutuamente excludentes por construção: a classe não tem mais um
-    ``__iter__`` que decide sozinha quais iteradores ativar e os roda em
-    sequência. Quem chama (normalmente ``task_dispatch_articles``) escolhe
-    explicitamente UM método por execução. Isso elimina a possibilidade de
-    dois iteradores selecionarem o mesmo artigo/``pp_xml_id`` na mesma
-    chamada.
+    A classe não tem um ``__iter__`` que decide sozinha quais iteradores
+    ativar: quem chama escolhe explicitamente quais métodos usar.
+    ``task_dispatch_articles`` usa ``from_article_source``,
+    ``from_pid_provider`` e ``from_article`` em sequência; como essas
+    fontes podem selecionar o mesmo ``pp_xml_id``, a deduplicação é feita
+    por ``task_dispatch_articles``. Por isso ``from_article_source`` também
+    entrega ``pp_xml_id`` (ignorado pelo pipeline quando há
+    ``article_source_id``).
 
     Uso::
 
@@ -477,11 +479,11 @@ class ArticleIteratorBuilder:
         """
         Itera ArticleSources pendentes ou com erro.
 
-        Otimização: ``.values(article_source_id=F("id"))`` sobre a
-        queryset retornada por ``get_queryset_to_complete_data`` já
-        entrega o dict pronto — sem instanciar cada ArticleSource
-        completo (não precisamos de mais nenhum campo do objeto para
-        montar o kwarg de despacho).
+        Otimização: ``.values(article_source_id=..., pp_xml_id=...)``
+        já entrega o dict pronto — sem instanciar cada ArticleSource
+        completo. ``pp_xml_id`` serve apenas para a deduplicação feita em
+        ``task_dispatch_articles``; o pipeline o substitui pelo do
+        ArticleSource.
         """
         params = {}
         if article_source_status_list:
@@ -501,7 +503,9 @@ class ArticleIteratorBuilder:
         yield from ArticleSource.objects.filter(
             qs,
             **params,
-        ).values(article_source_id=F("id")).iterator()
+        ).values(
+            article_source_id=F("id"), pp_xml_id=F("pid_provider_xml_id")
+        ).iterator()
 
     # ------------------------------------------------------------------
     # from_harvest
