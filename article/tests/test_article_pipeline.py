@@ -62,6 +62,32 @@ class TestTaskHarvestArticles(unittest.TestCase):
         self.assertEqual(first_call_kwargs["user_id"], user.id)
         self.assertEqual(first_call_kwargs["username"], user.username)
 
+    def test_same_pp_xml_id_is_dispatched_once_across_sources(self):
+        with patch(f"{MODULE_PATH}._get_user") as mock_get_user, \
+             patch(f"{MODULE_PATH}.ArticleIteratorBuilder") as MockBuilder, \
+             patch(f"{MODULE_PATH}.task_process_article_pipeline") as mock_pipeline:
+            mock_get_user.return_value = make_user()
+            builder = MockBuilder.return_value
+            builder.from_article_source.return_value = iter([
+                {"article_source_id": 1, "pp_xml_id": 2},
+                {"article_source_id": 4, "pp_xml_id": None},
+                {"article_source_id": 5, "pp_xml_id": None},
+            ])
+            builder.from_pid_provider.return_value = iter([
+                {"pp_xml_id": 2}, {"pp_xml_id": 3},
+            ])
+            builder.from_article.return_value = iter([
+                {"pp_xml_id": 3}, {"pp_xml_id": 6},
+            ])
+
+            task_dispatch_articles()
+
+        dispatched_kwargs = [c.kwargs for c in mock_pipeline.delay.call_args_list]
+        self.assertEqual(
+            [(k.get("article_source_id"), k["pp_xml_id"]) for k in dispatched_kwargs],
+            [(1, 2), (4, None), (5, None), (None, 3), (None, 6)],
+        )
+
     def test_none_items_are_skipped(self):
         with patch(f"{MODULE_PATH}._get_user") as mock_get_user, \
              patch(f"{MODULE_PATH}.ArticleIteratorBuilder") as MockBuilder, \
