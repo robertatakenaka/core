@@ -1,7 +1,10 @@
+from datetime import datetime, timezone
+
 from celery import current_app
 from django.conf import settings
 from django.contrib import messages
 from django.db.models import Case, Value, When
+from django.db.models.functions import Coalesce
 from django.template.defaultfilters import pluralize
 from django.urls import include, path
 from django.utils.translation import gettext_lazy as _
@@ -41,6 +44,7 @@ class PeriodicTaskAdmin(ModelAdmin):
         "kwargs",
         "schedule",
         "last_run_at",
+        "date_changed",
     )
     list_filter = [
         "enabled",
@@ -50,6 +54,9 @@ class PeriodicTaskAdmin(ModelAdmin):
     ]
     actions = ("enable_tasks", "disable_tasks", "toggle_tasks", "run_tasks")
     search_fields = ("name", "task")
+    # mais recente executada primeiro; tarefas nunca executadas ao final,
+    # desempatando pela atualização mais recente
+    ordering = ("-last_run_at_order", "-date_changed")
 
     def changelist_view(self, request, extra_context=None):
         extra_context = extra_context or {}
@@ -59,7 +66,11 @@ class PeriodicTaskAdmin(ModelAdmin):
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        return qs.select_related("interval", "crontab", "solar", "clocked")
+        return qs.select_related("interval", "crontab", "solar", "clocked").annotate(
+            last_run_at_order=Coalesce(
+                "last_run_at", Value(datetime(1970, 1, 1, tzinfo=timezone.utc))
+            )
+        )
 
     def _message_user_about_update(self, request, rows_updated, verb):
         """Send message about action to user.
