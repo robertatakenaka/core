@@ -849,12 +849,20 @@ def task_dispatch_articles(
             builder.from_article(data_status_list=data_status_list)
         )
 
+        # As fontes podem selecionar o mesmo PidProviderXML (ex.: pp_xml em
+        # TODO e Article inválido); despacha cada pp_xml_id uma única vez.
+        dispatched_pp_xml_ids = set()
         for item_iterator in item_iterators:
             if not item_iterator:
                 continue
             for item_kwargs in item_iterator:
                 if item_kwargs is None:
                     continue
+                pp_xml_id = item_kwargs.get("pp_xml_id")
+                if pp_xml_id:
+                    if pp_xml_id in dispatched_pp_xml_ids:
+                        continue
+                    dispatched_pp_xml_ids.add(pp_xml_id)
                 task_process_article_pipeline.delay(**item_kwargs, **common_kwargs)
 
     except Exception as e:
