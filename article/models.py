@@ -617,23 +617,35 @@ class Article(
 
     def create_legacy_keys(self, user=None, force_update=False):
         if not force_update:
-            if self.legacy_article.count() == self.journal.scielojournal_set.count():
+            # verifica por coleção e não pela contagem (ver
+            # Issue.create_legacy_keys)
+            missing = self.journal.scielojournal_set.filter(
+                collection__isnull=False
+            ).exclude(
+                collection__in=self.legacy_article.filter(
+                    collection__isnull=False
+                ).values("collection")
+            )
+            if not missing.exists():
                 return
 
         # garante que a issue tenha suas chaves legadas criadas
         self.issue.create_legacy_keys(user, force_update)
 
-        for issue_key in self.issue.get_legacy_keys():
-            collection = issue_key["collection"]
-            issue_pid = issue_key["pid"]
-            if not self.pid_v2:
-                # este valor deve vir pela importação do AM ou
-                # pelo upload (migração ou alimentação direta)
-                # via solicitação de pid para o pid provider
+        if not self.pid_v2:
+            # este valor deve vir pela importação do AM ou
+            # pelo upload (migração ou alimentação direta)
+            # via solicitação de pid para o pid provider
+            return
+
+        # percorre todos os AMIssue (e não get_legacy_keys, que retorna
+        # apenas um por coleção) para encontrar o que corresponde ao pid_v2
+        for am_issue in self.issue.legacy_issue.select_related("collection"):
+            if not am_issue.pid or not am_issue.collection:
                 continue
-            if self.pid_v2 and issue_pid in self.pid_v2:
+            if self.pid_v2[1:].startswith(am_issue.pid):
                 am_article = AMArticle.create_or_update(
-                    self.pid_v2, collection, None, user, status="done"
+                    self.pid_v2, am_issue.collection, None, user, status="done"
                 )
                 self.legacy_article.add(am_article)
 
