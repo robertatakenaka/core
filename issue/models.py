@@ -215,16 +215,34 @@ class Issue(CommonControlField, ClusterableModel):
 
     def create_legacy_keys(self, user=None, force_update=None):
         if not force_update:
-            if self.legacy_issue.count() == self.journal.scielojournal_set.count():
+            # verifica por coleção e não pela contagem, que pode coincidir
+            # mesmo faltando AMIssue de alguma coleção (ex.: AMIssue duplicado
+            # em uma coleção ou periódico incluído em outra coleção depois)
+            missing = self.journal.scielojournal_set.filter(
+                collection__isnull=False
+            ).exclude(
+                collection__in=self.legacy_issue.filter(
+                    collection__isnull=False
+                ).values("collection")
+            )
+            if not missing.exists():
                 return
 
         if not self.issue_pid_suffix:
             self.issue_pid_suffix = self.generate_issue_pid_suffix()
             self.save()
 
-        for sj in self.journal.scielojournal_set.all():
+        user = user or self.updated_by or self.creator
+
+        for sj in self.journal.scielojournal_set.select_related("collection"):
+            if not sj.collection or not sj.issn_scielo or not self.year:
+                continue
+            if self.legacy_issue.filter(collection=sj.collection).exists():
+                # mantém o AMIssue existente (migrado ou gerado anteriormente)
+                # para não criar um segundo registro com PID divergente
+                continue
             pid = f"{sj.issn_scielo}{self.year}{self.issue_pid_suffix}"
-            am_issue = AMIssue.create_or_update(
+            AMIssue.create_or_update(
                 pid, sj.collection, None, user, status="done", new_record=self
             )
 
@@ -640,7 +658,9 @@ class Issue(CommonControlField, ClusterableModel):
         super().save(*args, **kwargs)
         
         if self.journal:  # Só cria se tiver journal associado
-            self.create_legacy_keys(user=self.creator, force_update=True)
+            self.create_legacy_keys(
+                user=self.updated_by or self.creator, force_update=True
+            )
 
     def generate_issue_pid_suffix(self):
         return str(self.generate_order()).zfill(4)
