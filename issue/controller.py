@@ -3,8 +3,10 @@ import logging
 import sys
 import traceback
 
+from django.db.models import Count
+
 from core.mongodb import write_item
-from issue.models import Issue, IssueExporter
+from issue.models import AMIssue, Issue, IssueExporter
 from tracker.models import UnexpectedEvent
 
 
@@ -218,3 +220,149 @@ def bulk_export_issues_to_articlemeta(
             },
         )
         raise
+
+def _choose_am_issue_to_keep(am_issues, article_pids_v2):
+    """
+    Escolhe, entre AMIssue duplicados (mesmo issue e coleção), o que deve
+    ser mantido: o que corresponde a mais pid_v2 de artigos do issue;
+    em caso de empate, prefere o migrado (com data) e depois o mais antigo.
+    """
+
+    def score(am_issue):
+        matches = sum(
+            1 for pid_v2 in article_pids_v2 if pid_v2[1:].startswith(am_issue.pid or "-")
+        )
+        return (matches, bool(am_issue.data), -am_issue.created.timestamp())
+
+    return max(am_issues, key=score)
+
+
+def fix_issue_legacy_keys(
+    user,
+    collection_acron_list=None,
+    journal_acron_list=None,
+    publication_year=None,
+    dry_run=True,
+):
+    """
+    Corrige chaves legadas de issues e artigos:
+
+    1. Remove AMIssue gerados (sem data) duplicados para o mesmo issue e
+       coleção, mantendo o que corresponde aos pid_v2 dos artigos.
+       AMIssue migrados (com data) nunca são removidos.
+    2. Recria AMArticle dos artigos com pid_v2 que não possuem chave legada.
+
+    Args:
+        user: usuário responsável
+        collection_acron_list: filtra por coleções
+        journal_acron_list: filtra por periódicos
+        publication_year: filtra por ano
+        dry_run: se True, apenas relata o que seria feito
+
+    Returns:
+        dict com estatísticas da operação
+    """
+    # evita importação circular
+    from article.models import Article
+
+    stats = {
+        "dry_run": dry_run,
+        "issues_with_duplicates": 0,
+        "am_issues_deleted": [],
+        "am_issues_kept_with_data_conflict": [],
+        "articles_without_legacy_keys": 0,
+        "articles_fixed": 0,
+        "articles_still_without_legacy_keys": [],
+        "errors": 0,
+    }
+
+    issue_ids = list(
+        Issue.select_issues(
+            collection_acron_list=collection_acron_list,
+            journal_acron_list=journal_acron_list,
+            publication_year=publication_year,
+        ).values_list("id", flat=True)
+    )
+    if not issue_ids:
+        return stats
+
+    # 1. AMIssue duplicados por (issue, coleção)
+    duplicated = (
+        AMIssue.objects.filter(new_record_id__in=issue_ids)
+        .values("new_record_id", "collection_id")
+        .annotate(total=Count("id"))
+        .filter(total__gt=1)
+    )
+    for item in duplicated.iterator():
+        try:
+            stats["issues_with_duplicates"] += 1
+            am_issues = list(
+                AMIssue.objects.filter(
+                    new_record_id=item["new_record_id"],
+                    collection_id=item["collection_id"],
+                ).select_related("collection")
+            )
+            article_pids_v2 = list(
+                Article.objects.filter(
+                    issue_id=item["new_record_id"], pid_v2__isnull=False
+                ).values_list("pid_v2", flat=True)
+            )
+            keep = _choose_am_issue_to_keep(am_issues, article_pids_v2)
+            for am_issue in am_issues:
+                if am_issue.pk == keep.pk:
+                    continue
+                if am_issue.data:
+                    # migrado: não remove, apenas relata
+                    stats["am_issues_kept_with_data_conflict"].append(str(am_issue))
+                    continue
+                stats["am_issues_deleted"].append(str(am_issue))
+                if not dry_run:
+                    am_issue.delete()
+        except Exception as e:
+            stats["errors"] += 1
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            UnexpectedEvent.create(
+                exception=e,
+                exc_traceback=exc_traceback,
+                detail={
+                    "operation": "fix_issue_legacy_keys.dedup_am_issue",
+                    "item": item,
+                },
+            )
+
+    # 2. artigos sem AMArticle
+    articles = (
+        Article.objects.filter(
+            issue_id__in=issue_ids,
+            pid_v2__isnull=False,
+            legacy_article__isnull=True,
+        )
+        .select_related("issue", "journal")
+        .distinct()
+    )
+    stats["articles_without_legacy_keys"] = articles.count()
+    if dry_run:
+        return stats
+
+    for article in articles.iterator():
+        try:
+            article.create_legacy_keys(user, force_update=True)
+            if article.legacy_article.exists():
+                stats["articles_fixed"] += 1
+            else:
+                stats["articles_still_without_legacy_keys"].append(
+                    f"{article.pid_v2} {article.issue}"
+                )
+        except Exception as e:
+            stats["errors"] += 1
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            UnexpectedEvent.create(
+                exception=e,
+                exc_traceback=exc_traceback,
+                detail={
+                    "operation": "fix_issue_legacy_keys.article",
+                    "article": str(article),
+                    "pid_v2": article.pid_v2,
+                },
+            )
+    return stats
