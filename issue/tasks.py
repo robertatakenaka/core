@@ -585,3 +585,57 @@ def task_update_issues_from_amissue(
         
         # Re-raise para que o Celery possa tratar a exceção adequadamente
         raise
+
+@celery_app.task(bind=True, name="task_fix_issue_legacy_keys")
+def task_fix_issue_legacy_keys(
+    self,
+    user_id=None,
+    username=None,
+    collection_acron_list=None,
+    journal_acron_list=None,
+    publication_year=None,
+    dry_run=True,
+):
+    """
+    Remove AMIssue gerados duplicados (mesmo issue e coleção) e recria
+    as chaves legadas (AMArticle) dos artigos que não as possuem.
+
+    Args:
+        user_id: ID do usuário
+        username: Nome do usuário
+        collection_acron_list: Lista de acrônimos de coleções
+        journal_acron_list: Lista de acrônimos de periódicos
+        publication_year: Ano de publicação
+        dry_run: Se True (padrão), apenas relata o que seria feito
+
+    Returns:
+        dict: Estatísticas da operação
+    """
+    try:
+        user = _get_user(request=self.request, user_id=user_id, username=username)
+        stats = controller.fix_issue_legacy_keys(
+            user,
+            collection_acron_list=collection_acron_list,
+            journal_acron_list=journal_acron_list,
+            publication_year=publication_year,
+            dry_run=dry_run,
+        )
+        logger.info(f"task_fix_issue_legacy_keys: {stats}")
+        return stats
+    except Exception as e:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        UnexpectedEvent.create(
+            exception=e,
+            exc_traceback=exc_traceback,
+            action="issue.tasks.task_fix_issue_legacy_keys",
+            detail={
+                "collection_acron_list": collection_acron_list,
+                "journal_acron_list": journal_acron_list,
+                "publication_year": publication_year,
+                "dry_run": dry_run,
+                "user_id": user_id,
+                "username": username,
+                "task_id": self.request.id if hasattr(self.request, "id") else None,
+            },
+        )
+        raise
