@@ -7,7 +7,6 @@ from functools import cached_property
 from zlib import crc32
 
 from django.core.files.base import ContentFile
-from django.core.exceptions import FieldError
 from django.db import IntegrityError, models, transaction
 from django.db.models import Count, F, Prefetch, Q
 from django.utils.translation import gettext_lazy as _
@@ -32,7 +31,6 @@ from core.utils.profiling_tools import (  # ajuste o import conforme sua estrutu
 from pid_provider import choices, exceptions
 from pid_provider.multi_collection import (
     get_journal_pid_from_v2,
-    get_xml_collection_acron,
     get_xml_collections,
     normalize_acron,
 )
@@ -1181,21 +1179,6 @@ class PidProviderXML(BasePidProviderXML, CommonControlField, ClusterableModel):
                 raise exceptions.RequiredCollectionErrorToGetPidProviderXMLError(
                     "Unable to identify collection from XML. Please provide collection_acron or ensure XML has valid collection information."
                 )
-            if not xml_with_pre.collection:
-                # o XML não informa a coleção de origem (custom-meta):
-                # identifica-a entre as coleções do periódico, senão o pid v2
-                # e a versão do XML da coleção não seriam registrados
-                # (ver add_collections)
-                collection_acron = get_xml_collection_acron(
-                    xml_with_pre, xml_collections
-                )
-                if not collection_acron:
-                    raise exceptions.RequiredCollectionErrorToGetPidProviderXMLError(
-                        "Unable to identify the XML collection among the journal collections "
-                        f"{[item['collection'].acron3 for item in xml_collections]}. "
-                        "Please provide collection_acron or ensure XML has valid collection information."
-                    )
-                xml_with_pre.collection = collection_acron
             # a coleção de origem informada no XML (custom-meta) deve ser uma
             # das coleções do periódico, senão o pid v2 e a versão do XML da
             # coleção não seriam registrados (ver add_collections)
@@ -1458,15 +1441,11 @@ class PidProviderXML(BasePidProviderXML, CommonControlField, ClusterableModel):
         XML sem a coleção de origem, de periódico de uma única coleção, é
         dessa coleção. Coleção principal: a classificada como scielonetwork
         ou, na falta, a única coleção do periódico.
-
-        Core: XML sem a coleção de origem, de periódico de mais de uma
-        coleção, tem a coleção identificada pelo PID e acrônimo do periódico
-        (ver get_xml_collection_acron, como em register)
         """
         xml_collections = xml_collections or []
         collection_acron = xml_with_pre.collection
-        if not collection_acron:
-            collection_acron = get_xml_collection_acron(xml_with_pre, xml_collections)
+        if not collection_acron and len(xml_collections) == 1:
+            collection_acron = xml_collections[0]["collection"].acron3
 
         main = next((item for item in xml_collections if item["is_main"]), None)
         if not main and len(xml_collections) == 1:
@@ -1503,12 +1482,10 @@ class PidProviderXML(BasePidProviderXML, CommonControlField, ClusterableModel):
                 current_version__isnull=False
             ).select_related("collection")
         )
-        # periódico em mais de uma coleção, com menos documentos na coleção
-        # (com versão) do que coleções do periódico
-        if len(journal_collection_ids) > 1 and len(
-            journal_collection_ids & {item.collection_id for item in versions}
-        ) < len(journal_collection_ids):
-            reasons.append("missing_collection_pids_v2")
+        # não se exige CollectionPidV2 de todas as coleções do periódico: o
+        # artigo pode não existir em outra coleção (o periódico pode não ter
+        # sido aceito ou ter sido desindexado nela) e o XML de uma coleção
+        # não completa os dados de outra
 
         item = next(
             (item for item in versions if item.collection.acron3 == collection_acron),
@@ -1739,6 +1716,7 @@ class PidProviderXML(BasePidProviderXML, CommonControlField, ClusterableModel):
         xml_pid_v3 = xml_adapter.v3
         # select_related("current_version") já vem do manager
         results = cls.objects.filter(v3=xml_pid_v3)
+
         if not results.exists():
             # pid v3 é inédito
             raise cls.DoesNotExist
@@ -2021,8 +1999,7 @@ class PidProviderXML(BasePidProviderXML, CommonControlField, ClusterableModel):
         except cls.MultipleObjectsReturned as e:
             return cls.objects.filter(**params).order_by("-updated").first()
 
-    # OBSOLETO: o pid v2 é corrigido por coleção no Upload
-    # (proc.models.ArticleProc.fix_pid_v2), que registra novamente o XML
+    # OBSOLETO: o pid v2 é corrigido por coleção em proc.models.ArticleProc.fix_pid_v2
     @classmethod
     @profile_classmethod
     def fix_pid_v2(cls, user, pid_v3, correct_pid_v2):
@@ -2040,7 +2017,7 @@ class PidProviderXML(BasePidProviderXML, CommonControlField, ClusterableModel):
             item._add_current_version(xml_with_pre, user, delete=True)
             item.v2 = correct_pid_v2
             item.save()
-            # Core: a versão anterior foi apagada (current_version = NULL)
+            # a versão anterior foi apagada (current_version = NULL)
             # no registro da coleção do pid v2 corrigido
             if incorrect_pid_v2:
                 for collection_pid_v2 in item.collection_pids_v2.filter(
