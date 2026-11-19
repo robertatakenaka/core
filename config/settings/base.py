@@ -129,6 +129,7 @@ LOCAL_APPS = [
     "bigbang",
     "book",
     "collection",
+    "collection_completion",
     "core",
     "editorialboard",
     "files_storage",
